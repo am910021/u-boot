@@ -1956,6 +1956,33 @@ static void rk3588_clk_init(struct rk3588_clk_priv *priv)
 		     (ACLK_TOP_S200_SEL_200M << ACLK_TOP_S200_SEL_SHIFT));
 }
 
+#if CONFIG_IS_ENABLED(CLK_SCMI) && !defined(CONFIG_XPL_BUILD)
+static void rk3588_clk_raise_cpu_clocks(void)
+{
+	const ulong scmi_cpu_clks[] = {
+		SCMI_CLK_CPUL, SCMI_CLK_CPUB01, SCMI_CLK_CPUB23
+	};
+	struct udevice *scmi_dev;
+	struct clk clk;
+	int ret, i;
+
+	ret = uclass_get_device_by_driver(UCLASS_CLK,
+					  DM_DRIVER_GET(scmi_clock),
+					  &scmi_dev);
+	if (ret)
+		return;
+
+	clk.dev = scmi_dev;
+	for (i = 0; i < ARRAY_SIZE(scmi_cpu_clks); i++) {
+		clk.id = scmi_cpu_clks[i];
+		ret = clk_set_rate(&clk, CPU_PVTPLL_HZ);
+		if (ret < 0)
+			printf("Failed to set SCMI cpu clk %lu: %d\n",
+			       clk.id, ret);
+	}
+}
+#endif
+
 static int rk3588_clk_probe(struct udevice *dev)
 {
 	struct rk3588_clk_priv *priv = dev_get_priv(dev);
@@ -1983,6 +2010,10 @@ static int rk3588_clk_probe(struct udevice *dev)
 		return PTR_ERR(priv->grf);
 
 	rk3588_clk_init(priv);
+
+#if CONFIG_IS_ENABLED(CLK_SCMI) && !defined(CONFIG_XPL_BUILD)
+	rk3588_clk_raise_cpu_clocks();
+#endif
 
 	/* Process 'assigned-{clocks/clock-parents/clock-rates}' properties */
 	ret = clk_set_defaults(dev, 1);
