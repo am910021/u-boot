@@ -9,4 +9,8 @@ config SYS_VENDOR
 config SYS_CONFIG_NAME
 	default "nanopc-t6-rk3588"
 
+config NANOPC_T6_SHOW_LOGO
+	bool "Show the NanoPC-T6 boot logo"
+	default y
+
 endif
