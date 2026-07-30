@@ -14,6 +14,8 @@
 #define CFG_SYS_SDRAM_BASE		0
 #define SDRAM_MAX_SIZE			0xf0000000
 
+#include <env/rockchip/rk3588-freebsd.h>
+
 #ifndef ROCKCHIP_DEVICE_SETTINGS
 #define ROCKCHIP_DEVICE_SETTINGS
 #endif
@@ -34,6 +36,7 @@
 	"fdtfile=" CONFIG_DEFAULT_FDT_FILE "\0"	\
 	ENV_MEM_LAYOUT_SETTINGS		\
 	ROCKCHIP_DEVICE_SETTINGS	\
+	RK3588_FREEBSD_ENV_SETTINGS	\
 	"boot_targets=" BOOT_TARGETS "\0"
 
 #endif /* __CONFIG_RK3588_COMMON_H */

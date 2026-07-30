@@ -1,5 +1,23 @@
 if ROCKCHIP_RK3588
 
+config RK3588_FREEBSD_BOOT
+	bool "FreeBSD boot environment"
+	default y
+	select BMP_32BPP
+	select CMD_BMP
+	select CMD_BOOTMENU
+	select DISPLAY_ROCKCHIP_HDMI_QP
+	select VIDEO
+	select VIDEO_ROCKCHIP
+	help
+	  Provide the common FreeBSD logo, boot menu and SD-to-eMMC
+	  fallback environment for RK3588 boards.
+
+config RK3588_FREEBSD_SHOW_LOGO
+	bool "Show the RK3588 FreeBSD boot logo"
+	depends on RK3588_FREEBSD_BOOT
+	default y
+
 config TARGET_EVB_RK3588
 	bool "Rockchip EVB1 v10"
 	help
