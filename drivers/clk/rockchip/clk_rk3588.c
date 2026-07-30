@@ -1091,9 +1091,10 @@ static ulong rk3588_dclk_vop_set_clk(struct rk3588_clk_priv *priv,
 				     ulong clk_id, ulong rate)
 {
 	struct rk3588_cru *cru = priv->cru;
-	ulong pll_rate, now, best_rate = 0;
-	u32 i, conid, con, sel, div, best_div = 0, best_sel = 0;
-	u32 mask, div_shift, sel_shift;
+	ulong pll_rate;
+	u32 i, conid, con, sel, div, max_div;
+	u32 mask, div_mask, div_shift, sel_shift;
+	int ret;
 
 	switch (clk_id) {
 	case DCLK_VOP0:
@@ -1102,6 +1103,7 @@ static ulong rk3588_dclk_vop_set_clk(struct rk3588_clk_priv *priv,
 		con = readl(&cru->clksel_con[111]);
 		sel = (con & DCLK0_VOP_SRC_SEL_MASK) >> DCLK0_VOP_SRC_SEL_SHIFT;
 		mask = DCLK0_VOP_SRC_SEL_MASK | DCLK0_VOP_SRC_DIV_MASK;
+		div_mask = DCLK0_VOP_SRC_DIV_MASK;
 		div_shift = DCLK0_VOP_SRC_DIV_SHIFT;
 		sel_shift = DCLK0_VOP_SRC_SEL_SHIFT;
 		break;
@@ -1111,6 +1113,7 @@ static ulong rk3588_dclk_vop_set_clk(struct rk3588_clk_priv *priv,
 		con = readl(&cru->clksel_con[111]);
 		sel = (con & DCLK1_VOP_SRC_SEL_MASK) >> DCLK1_VOP_SRC_SEL_SHIFT;
 		mask = DCLK1_VOP_SRC_SEL_MASK | DCLK1_VOP_SRC_DIV_MASK;
+		div_mask = DCLK1_VOP_SRC_DIV_MASK;
 		div_shift = DCLK1_VOP_SRC_DIV_SHIFT;
 		sel_shift = DCLK1_VOP_SRC_SEL_SHIFT;
 		break;
@@ -1120,6 +1123,7 @@ static ulong rk3588_dclk_vop_set_clk(struct rk3588_clk_priv *priv,
 		con = readl(&cru->clksel_con[112]);
 		sel = (con & DCLK2_VOP_SRC_SEL_MASK) >> DCLK2_VOP_SRC_SEL_SHIFT;
 		mask = DCLK2_VOP_SRC_SEL_MASK | DCLK2_VOP_SRC_DIV_MASK;
+		div_mask = DCLK2_VOP_SRC_DIV_MASK;
 		div_shift = DCLK2_VOP_SRC_DIV_SHIFT;
 		sel_shift = DCLK2_VOP_SRC_SEL_SHIFT;
 		break;
@@ -1128,6 +1132,7 @@ static ulong rk3588_dclk_vop_set_clk(struct rk3588_clk_priv *priv,
 		con = readl(&cru->clksel_con[113]);
 		sel = (con & DCLK3_VOP_SRC_SEL_MASK) >> DCLK3_VOP_SRC_SEL_SHIFT;
 		mask = DCLK3_VOP_SRC_SEL_MASK | DCLK3_VOP_SRC_DIV_MASK;
+		div_mask = DCLK3_VOP_SRC_DIV_MASK;
 		div_shift = DCLK3_VOP_SRC_DIV_SHIFT;
 		sel_shift = DCLK3_VOP_SRC_SEL_SHIFT;
 		break;
@@ -1135,67 +1140,67 @@ static ulong rk3588_dclk_vop_set_clk(struct rk3588_clk_priv *priv,
 		return -ENOENT;
 	}
 
+	max_div = (div_mask >> div_shift) + 1;
 	if (sel == DCLK_VOP_SRC_SEL_V0PLL) {
 		pll_rate = rockchip_pll_get_rate(&rk3588_pll_clks[V0PLL],
 						 priv->cru, V0PLL);
 		if (pll_rate >= RK3588_VOP_PLL_LIMIT_FREQ && pll_rate % rate == 0) {
 			div = DIV_ROUND_UP(pll_rate, rate);
-			rk_clrsetreg(&cru->clksel_con[conid],
-				     mask,
-				     DCLK_VOP_SRC_SEL_V0PLL << sel_shift |
-				     ((div - 1) << div_shift));
-		} else {
-			div = DIV_ROUND_UP(RK3588_VOP_PLL_LIMIT_FREQ, rate);
-			rk_clrsetreg(&cru->clksel_con[conid],
-				     mask,
-				     DCLK_VOP_SRC_SEL_V0PLL << sel_shift |
-				     ((div - 1) << div_shift));
-			rockchip_pll_set_rate(&rk3588_pll_clks[V0PLL],
-					      priv->cru, V0PLL, div * rate);
-		}
-	} else {
-		for (i = 0; i <= DCLK_VOP_SRC_SEL_AUPLL; i++) {
-			switch (i) {
-			case DCLK_VOP_SRC_SEL_GPLL:
-				pll_rate = priv->gpll_hz;
-				break;
-			case DCLK_VOP_SRC_SEL_CPLL:
-				pll_rate = priv->cpll_hz;
-				break;
-			case DCLK_VOP_SRC_SEL_AUPLL:
-				pll_rate = priv->aupll_hz;
-				break;
-			case DCLK_VOP_SRC_SEL_V0PLL:
-				pll_rate = 0;
-				break;
-			default:
-				printf("do not support this vop pll sel\n");
-				return -EINVAL;
+			if (div <= max_div) {
+				rk_clrsetreg(&cru->clksel_con[conid],
+					     mask,
+					     DCLK_VOP_SRC_SEL_V0PLL << sel_shift |
+					     ((div - 1) << div_shift));
+				return rk3588_dclk_vop_get_clk(priv, clk_id);
 			}
-
-			div = DIV_ROUND_UP(pll_rate, rate);
-			if (div > 255)
-				continue;
-			now = pll_rate / div;
-			if (abs(rate - now) < abs(rate - best_rate)) {
-				best_rate = now;
-				best_div = div;
-				best_sel = i;
-			}
-			debug("p_rate=%lu, best_rate=%lu, div=%u, sel=%u\n",
-			      pll_rate, best_rate, best_div, best_sel);
-		}
-
-		if (best_rate) {
-			rk_clrsetreg(&cru->clksel_con[conid],
-				     mask,
-				     best_sel << sel_shift |
-				     (best_div - 1) << div_shift);
-		} else {
-			printf("do not support this vop freq %lu\n", rate);
-			return -EINVAL;
 		}
 	}
+
+	for (i = 0; i <= DCLK_VOP_SRC_SEL_AUPLL; i++) {
+		switch (i) {
+		case DCLK_VOP_SRC_SEL_GPLL:
+			pll_rate = priv->gpll_hz;
+			break;
+		case DCLK_VOP_SRC_SEL_CPLL:
+			pll_rate = priv->cpll_hz;
+			break;
+		case DCLK_VOP_SRC_SEL_AUPLL:
+			pll_rate = priv->aupll_hz;
+			break;
+		case DCLK_VOP_SRC_SEL_V0PLL:
+			continue;
+		default:
+			return -EINVAL;
+		}
+
+		if (pll_rate % rate)
+			continue;
+
+		div = pll_rate / rate;
+		if (div && div <= max_div) {
+			rk_clrsetreg(&cru->clksel_con[conid],
+				     mask,
+				     i << sel_shift |
+				     (div - 1) << div_shift);
+			return rk3588_dclk_vop_get_clk(priv, clk_id);
+		}
+	}
+
+	div = DIV_ROUND_UP(RK3588_VOP_PLL_LIMIT_FREQ, rate);
+	if (!div || div > max_div)
+		return -EINVAL;
+
+	pll_rate = div * rate;
+	ret = rockchip_pll_set_rate(&rk3588_pll_clks[V0PLL],
+				    priv->cru, V0PLL, pll_rate);
+	if (ret)
+		return ret;
+
+	rk_clrsetreg(&cru->clksel_con[conid],
+		     mask,
+		     DCLK_VOP_SRC_SEL_V0PLL << sel_shift |
+		     ((div - 1) << div_shift));
+
 	return rk3588_dclk_vop_get_clk(priv, clk_id);
 }
 
