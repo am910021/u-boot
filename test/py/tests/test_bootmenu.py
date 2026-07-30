@@ -40,6 +40,11 @@ def test_bootmenu(ubman):
         response = ubman.run_command(cmd='\x1b', wait_for_echo=False, send_nl=False)
         assert 'ok' not in response
         assert 'rc:0' in response
+        ubman.run_command('setenv bootmenu_title Test Boot Menu')
+        ubman.run_command('bootmenu 2', wait_for_prompt=False)
+        ubman.p.expect(['Test Boot Menu'])
+        ubman.run_command(cmd='\x1b', wait_for_echo=False, send_nl=False)
+        ubman.run_command('setenv bootmenu_title')
         ubman.run_command('setenv bootmenu_default')
         ubman.run_command('setenv bootmenu_0')
         ubman.run_command('setenv bootmenu_1')
