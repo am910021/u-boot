@@ -46,11 +46,22 @@
 				"fi; " \
 			"fi; " \
 		"fi\0" \
+	"set_boot_mmc_order=" \
+		"if test \"${rk_boot_storage}\" = \"1\"; then " \
+			"setenv boot_primary_mmcdev 0; " \
+			"setenv boot_fallback_mmcdev 1; " \
+		"else " \
+			"setenv boot_primary_mmcdev 1; " \
+			"setenv boot_fallback_mmcdev 0; " \
+		"fi\0" \
 	"load_bootmenu=" \
+		"run set_boot_mmc_order; " \
 		"setenv bootmenu_loaded 0; run reset_bootmenu; " \
-		"setenv bootmenu_mmcdev 1; run load_bootmenu_mmc; " \
+		"setenv bootmenu_mmcdev ${boot_primary_mmcdev}; " \
+		"run load_bootmenu_mmc; " \
 		"if test \"${bootmenu_loaded}\" != \"1\"; then " \
-			"setenv bootmenu_mmcdev 0; run load_bootmenu_mmc; " \
+			"setenv bootmenu_mmcdev ${boot_fallback_mmcdev}; " \
+			"run load_bootmenu_mmc; " \
 		"fi; " \
 		"if test \"${bootmenu_loaded}\" != \"1\"; then " \
 			"echo \"Using built-in FreeBSD boot menu\"; " \
@@ -96,8 +107,11 @@
 			"fi; " \
 		"fi\0" \
 	"boot_freebsd=" \
-		"setenv boot_mmcdev 1; run boot_freebsd_from_mmc; " \
-		"setenv boot_mmcdev 0; run boot_freebsd_from_mmc; " \
+		"run set_boot_mmc_order; " \
+		"setenv boot_mmcdev ${boot_primary_mmcdev}; " \
+		"run boot_freebsd_from_mmc; " \
+		"setenv boot_mmcdev ${boot_fallback_mmcdev}; " \
+		"run boot_freebsd_from_mmc; " \
 		"setenv boot_mmcdev; echo \"FreeBSD boot failed\"\0" \
 	"fallback_menu=" \
 		"run load_bootmenu; " \
