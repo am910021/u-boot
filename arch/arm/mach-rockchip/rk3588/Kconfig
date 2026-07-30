@@ -6,6 +6,7 @@ config RK3588_FREEBSD_BOOT
 	select BMP_32BPP
 	select CMD_BMP
 	select CMD_BOOTMENU
+	select CMD_IMPORTENV
 	select DISPLAY_ROCKCHIP_HDMI_QP
 	select VIDEO
 	select VIDEO_ROCKCHIP
