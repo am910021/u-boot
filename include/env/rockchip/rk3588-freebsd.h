@@ -16,7 +16,7 @@
 	"bootmenu_delay=3\0" \
 	"bootmenu_0=FreeBSD=run boot_freebsd\0" \
 	"bootmenu_1=U-Boot CLI=exit\0" \
-	"bootmenu_config=/EFI/bootmenu.env\0" \
+	"bootmenu_config=/bootmenu.env\0" \
 	RK3588_FREEBSD_LOGO_SETTING \
 	"reset_bootmenu=" \
 		"setenv bootmenu_title \"*** FreeBSD U-Boot Boot Menu ***\"; " \
