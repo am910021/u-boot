@@ -56,6 +56,14 @@ config PHY_ROCKCHIP_USBDP
 	  Enable this to support the Rockchip USB3.0/DP
 	  combo PHY with Samsung IP block.
 
+config PHY_ROCKCHIP_SAMSUNG_HDPTX_HDMI
+	bool "Rockchip RK3588 Samsung HDMI TX PHY"
+	depends on ROCKCHIP_RK3588
+	select LIB_RATIONAL
+	select PHY
+	help
+	  Enable the HDMI TMDS mode of the Samsung HDPTX PHY found on RK3588.
+
 config PHY_ROCKCHIP_TYPEC
 	bool "Rockchip TYPEC PHY Driver"
 	depends on ARCH_ROCKCHIP

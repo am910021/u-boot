@@ -11,6 +11,7 @@
 menuconfig VIDEO_ROCKCHIP
 	bool "Enable Rockchip Video Support"
 	depends on VIDEO && ARCH_ROCKCHIP
+	select DISPLAY
 	imply VIDEO_DAMAGE
 	help
 	  Rockchip SoCs provide video output capabilities for High-Definition
@@ -23,7 +24,7 @@ menuconfig VIDEO_ROCKCHIP
 config VIDEO_ROCKCHIP_MAX_XRES
         int "Maximum horizontal resolution (for memory allocation purposes)"
 	depends on VIDEO_ROCKCHIP
-	default 3840 if DISPLAY_ROCKCHIP_HDMI
+	default 3840 if DISPLAY_ROCKCHIP_HDMI || DISPLAY_ROCKCHIP_HDMI_QP
 	default 1920
 	help
 	  The maximum horizontal resolution to support for the framebuffer.
@@ -33,7 +34,7 @@ config VIDEO_ROCKCHIP_MAX_XRES
 config VIDEO_ROCKCHIP_MAX_YRES
         int "Maximum vertical resolution (for memory allocation purposes)"
 	depends on VIDEO_ROCKCHIP
-	default 2160 if DISPLAY_ROCKCHIP_HDMI
+	default 2160 if DISPLAY_ROCKCHIP_HDMI || DISPLAY_ROCKCHIP_HDMI_QP
 	default 1080
 	help
 	  The maximum vertical resolution to support for the framebuffer.
@@ -61,6 +62,15 @@ config DISPLAY_ROCKCHIP_HDMI
 	depends on VIDEO_ROCKCHIP
 	help
 	  This enables High-Definition Multimedia Interface display support.
+
+config DISPLAY_ROCKCHIP_HDMI_QP
+	bool "RK3588 HDMI QP port"
+	depends on VIDEO_ROCKCHIP && ROCKCHIP_RK3588
+	select PHY
+	select PHY_ROCKCHIP_SAMSUNG_HDPTX_HDMI
+	help
+	  Enable the RK3588 DesignWare HDMI QP controller in TMDS mode.
+	  The initial implementation supports the HDMI0 output with RGB888.
 
 config DISPLAY_ROCKCHIP_MIPI
 	bool "MIPI Port"
