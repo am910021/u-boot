@@ -471,10 +471,8 @@ int edid_get_timing_validate(u8 *buf, int buf_size,
 		return -ENOSYS;
 	}
 
-	if (!EDID1_INFO_FEATURE_PREFERRED_TIMING_MODE(*edid)) {
+	if (!EDID1_INFO_FEATURE_PREFERRED_TIMING_MODE(*edid))
 		debug("%s: No preferred timing\n", __func__);
-		return -ENOENT;
-	}
 
 	/* Look for detailed timing in base EDID */
 	found = edid_find_valid_detailed_timing(edid->monitor_details.descriptor, 4,
