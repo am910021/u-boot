@@ -15,7 +15,6 @@
 #include <dm.h>
 #include <dm/uclass-internal.h>
 #include <efi_loader.h>
-#include <event.h>
 #include <fastboot.h>
 #include <hash.h>
 #include <init.h>
@@ -211,30 +210,6 @@ static ulong rockchip_get_boot_storage(void)
 
 	return 0;
 }
-
-int rockchip_boot_storage_fixup(void *ctx, struct event *event)
-{
-	ofnode chosen;
-	ulong storage;
-	int ret;
-
-	storage = rockchip_get_boot_storage();
-	if (!storage)
-		return 0;
-
-	chosen = oftree_path(event->data.ft_fixup.tree, "/chosen");
-	if (!ofnode_valid(chosen))
-		return 0;
-
-	ret = ofnode_write_u32(chosen, "rockchip,boot-storage", storage);
-	if (ret)
-		log_warning("Could not add Rockchip boot storage to FDT: %d\n",
-			    ret);
-
-	return 0;
-}
-
-EVENT_SPY_FULL(EVT_FT_FIXUP, rockchip_boot_storage_fixup);
 
 __weak int rk_board_late_init(void)
 {

@@ -7,6 +7,7 @@
 #define LOG_CATEGORY LOGC_ARCH
 
 #include <dm.h>
+#include <env.h>
 #include <fdt_support.h>
 #include <misc.h>
 #include <spl.h>
@@ -357,10 +358,22 @@ int ft_system_setup(void *blob, struct bd_info *bd)
 	struct udevice *dev;
 	char soc_comp[16];
 	const char *comp;
+	ulong storage;
 	void *data;
 
 	if (!IS_ENABLED(CONFIG_OF_SYSTEM_SETUP))
 		return 0;
+
+	storage = env_get_ulong("rk_boot_storage", 10, 0);
+	if (storage) {
+		node = fdt_path_offset(blob, "/chosen");
+		if (node < 0)
+			return node;
+		ret = fdt_setprop_u32(blob, node, "rockchip,boot-storage",
+				      storage);
+		if (ret)
+			return ret;
+	}
 
 	if (!IS_ENABLED(CONFIG_ROCKCHIP_OTP) || !CONFIG_IS_ENABLED(MISC))
 		return -ENOSYS;
