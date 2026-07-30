@@ -15,6 +15,7 @@
 #include <dm.h>
 #include <dm/uclass-internal.h>
 #include <efi_loader.h>
+#include <event.h>
 #include <fastboot.h>
 #include <hash.h>
 #include <init.h>
@@ -30,6 +31,7 @@
 #include <u-boot/sha256.h>
 #include <asm/cache.h>
 #include <asm/io.h>
+#include <asm/arch-rockchip/bootrom.h>
 #include <asm/arch-rockchip/boot_mode.h>
 #include <asm/arch-rockchip/clock.h>
 #include <asm/arch-rockchip/periph.h>
@@ -184,6 +186,56 @@ static void gpt_capsule_update_setup(void)
 }
 #endif /* CONFIG_EFI_HAVE_CAPSULE_SUPPORT && CONFIG_EFI_PARTITION */
 
+/* Keep these values compatible with rkdeveloptool ChangeStorage. */
+#define ROCKCHIP_BOOT_STORAGE_EMMC	1
+#define ROCKCHIP_BOOT_STORAGE_SD	2
+#define ROCKCHIP_BOOT_STORAGE_SPI_NOR	9
+
+static ulong rockchip_get_boot_storage(void)
+{
+	const char *path;
+
+	path = ofnode_read_chosen_string("u-boot,spl-boot-device");
+	if (!path)
+		return 0;
+
+	if (boot_devices[BROM_BOOTSOURCE_EMMC] &&
+	    !strcmp(path, boot_devices[BROM_BOOTSOURCE_EMMC]))
+		return ROCKCHIP_BOOT_STORAGE_EMMC;
+	if (boot_devices[BROM_BOOTSOURCE_SD] &&
+	    !strcmp(path, boot_devices[BROM_BOOTSOURCE_SD]))
+		return ROCKCHIP_BOOT_STORAGE_SD;
+	if (boot_devices[BROM_BOOTSOURCE_SPINOR] &&
+	    !strcmp(path, boot_devices[BROM_BOOTSOURCE_SPINOR]))
+		return ROCKCHIP_BOOT_STORAGE_SPI_NOR;
+
+	return 0;
+}
+
+int rockchip_boot_storage_fixup(void *ctx, struct event *event)
+{
+	ofnode chosen;
+	ulong storage;
+	int ret;
+
+	storage = rockchip_get_boot_storage();
+	if (!storage)
+		return 0;
+
+	chosen = oftree_path(event->data.ft_fixup.tree, "/chosen");
+	if (!ofnode_valid(chosen))
+		return 0;
+
+	ret = ofnode_write_u32(chosen, "rockchip,boot-storage", storage);
+	if (ret)
+		log_warning("Could not add Rockchip boot storage to FDT: %d\n",
+			    ret);
+
+	return 0;
+}
+
+EVENT_SPY_FULL(EVT_FT_FIXUP, rockchip_boot_storage_fixup);
+
 __weak int rk_board_late_init(void)
 {
 	return 0;
@@ -191,11 +243,19 @@ __weak int rk_board_late_init(void)
 
 int board_late_init(void)
 {
+	ulong storage;
+
 	setup_boot_mode();
 
 #if IS_ENABLED(CONFIG_EFI_HAVE_CAPSULE_SUPPORT) && IS_ENABLED(CONFIG_EFI_PARTITION)
 	gpt_capsule_update_setup();
 #endif
+
+	storage = rockchip_get_boot_storage();
+	if (storage)
+		env_set_ulong("rk_boot_storage", storage);
+	else
+		env_set("rk_boot_storage", NULL);
 
 	return rk_board_late_init();
 }
