@@ -14,35 +14,23 @@
 	"bootdelay=0\0" \
 	"bootmenu_title=*** FreeBSD U-Boot Boot Menu ***\0" \
 	"bootmenu_delay=3\0" \
-	"bootmenu_0=FreeBSD=run boot_freebsd\0" \
-	"bootmenu_1=U-Boot CLI=exit\0" \
 	"bootmenu_config=/bootmenu.env\0" \
+	"freebsd_default_boot=auto\0" \
+	"freebsd_loader=/EFI/FreeBSD/loader.efi\0" \
+	"freebsd_dtb=/dtb/freebsd.dtb\0" \
 	RK3588_FREEBSD_LOGO_SETTING \
-	"reset_bootmenu=" \
-		"setenv bootmenu_title \"*** FreeBSD U-Boot Boot Menu ***\"; " \
-		"setenv bootmenu_delay 3; " \
-		"setenv bootmenu_0 \"FreeBSD=run boot_freebsd\"; " \
-		"setenv bootmenu_1 \"U-Boot CLI=exit\"; " \
-		"setenv bootmenu_2; setenv bootmenu_3; setenv bootmenu_4; " \
-		"setenv bootmenu_5; setenv bootmenu_6; setenv bootmenu_7; " \
-		"setenv bootmenu_8; setenv bootmenu_9\0" \
 	"load_bootmenu_mmc=" \
 		"if mmc dev ${bootmenu_mmcdev}; then " \
 			"if load mmc ${bootmenu_mmcdev}:1 ${scriptaddr} " \
 					"${bootmenu_config}; then " \
 				"if env import -t -r ${scriptaddr} ${filesize} " \
-						"bootmenu_title bootmenu_delay " \
-						"bootmenu_0 bootmenu_1 bootmenu_2 " \
-						"bootmenu_3 bootmenu_4 bootmenu_5 " \
-						"bootmenu_6 bootmenu_7 bootmenu_8 " \
-						"bootmenu_9; then " \
+						"bootmenu_title bootmenu_delay; then " \
 					"echo \"Loaded ${bootmenu_config} from mmc " \
 						"${bootmenu_mmcdev}:1\"; " \
 					"setenv bootmenu_loaded 1; " \
 				"else " \
 					"echo \"Invalid ${bootmenu_config} on mmc " \
 						"${bootmenu_mmcdev}:1\"; " \
-					"run reset_bootmenu; " \
 				"fi; " \
 			"fi; " \
 		"fi\0" \
@@ -56,7 +44,7 @@
 		"fi\0" \
 	"load_bootmenu=" \
 		"run set_boot_mmc_order; " \
-		"setenv bootmenu_loaded 0; run reset_bootmenu; " \
+		"setenv bootmenu_loaded 0; " \
 		"setenv bootmenu_mmcdev ${boot_primary_mmcdev}; " \
 		"run load_bootmenu_mmc; " \
 		"if test \"${bootmenu_loaded}\" != \"1\"; then " \
@@ -64,8 +52,7 @@
 			"run load_bootmenu_mmc; " \
 		"fi; " \
 		"if test \"${bootmenu_loaded}\" != \"1\"; then " \
-			"echo \"Using built-in FreeBSD boot menu\"; " \
-			"run reset_bootmenu; " \
+			"echo \"Using built-in FreeBSD menu settings\"; " \
 		"fi; " \
 		"setenv bootmenu_loaded; setenv bootmenu_mmcdev\0" \
 	"load_logo_mmc=" \
@@ -92,32 +79,23 @@
 			"if bmp display ${loadaddr} m m; then sleep 3; fi; " \
 		"fi; " \
 		"setenv logo_loaded; setenv logo_mmcdev\0" \
-	"boot_freebsd_from_mmc=" \
-		"if mmc dev ${boot_mmcdev}; then " \
-			"echo \"Trying FreeBSD from mmc ${boot_mmcdev}:1\"; " \
-			"if load mmc ${boot_mmcdev}:1 ${fdt_addr_r} /dtb/freebsd.dtb; then " \
-				"fdt addr ${fdt_addr_r}; " \
-				"if load mmc ${boot_mmcdev}:1 ${kernel_addr_r} " \
-						"/EFI/FreeBSD/loader.efi; then " \
-					"bootefi ${kernel_addr_r} ${fdt_addr_r}; " \
-				"elif load mmc ${boot_mmcdev}:1 ${kernel_addr_r} " \
-						"/EFI/BOOT/BOOTAA64.EFI; then " \
-					"bootefi ${kernel_addr_r} ${fdt_addr_r}; " \
-				"fi; " \
+	"boot_freebsd_target=" \
+		"echo \"Trying FreeBSD from ${freebsd_iface} " \
+			"${freebsd_devpart}\"; " \
+		"if load ${freebsd_iface} ${freebsd_devpart} ${fdt_addr_r} " \
+				"${freebsd_dtb}; then " \
+			"fdt addr ${fdt_addr_r}; " \
+			"if load ${freebsd_iface} ${freebsd_devpart} " \
+					"${kernel_addr_r} ${freebsd_loader}; then " \
+				"bootefi ${kernel_addr_r} ${fdt_addr_r}; " \
 			"fi; " \
-		"fi\0" \
-	"boot_freebsd=" \
-		"run set_boot_mmc_order; " \
-		"setenv boot_mmcdev ${boot_primary_mmcdev}; " \
-		"run boot_freebsd_from_mmc; " \
-		"setenv boot_mmcdev ${boot_fallback_mmcdev}; " \
-		"run boot_freebsd_from_mmc; " \
-		"setenv boot_mmcdev; echo \"FreeBSD boot failed\"\0" \
+		"fi; echo \"FreeBSD boot failed\"\0" \
 	"fallback_menu=" \
 		"run load_bootmenu; " \
+		"freebsdboot; " \
 		"echo \"RK3588 FreeBSD U-Boot 2026.07\"; " \
-		"echo \"Default after timeout: FreeBSD\"; " \
-		"bootmenu ${bootmenu_delay}; run boot_freebsd; bootflow scan -lb\0" \
+		"echo \"Default target: ${freebsd_default_boot}\"; " \
+		"bootmenu ${bootmenu_delay}\0" \
 	"bootcmd=" \
 		"if test \"${logo_enable}\" = \"1\"; then run show_logo; fi; " \
 		"setenv stdout serial,vidconsole; " \

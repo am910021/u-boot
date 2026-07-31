@@ -6,13 +6,15 @@ config RK3588_FREEBSD_BOOT
 	select BMP_32BPP
 	select CMD_BMP
 	select CMD_BOOTMENU
+	select CMD_FS_GENERIC
 	select CMD_IMPORTENV
 	select DISPLAY_ROCKCHIP_HDMI_QP
+	select FS_FAT
 	select VIDEO
 	select VIDEO_ROCKCHIP
 	help
-	  Provide the common FreeBSD logo, boot menu and SD-to-eMMC
-	  fallback environment for RK3588 boards.
+	  Provide the common FreeBSD logo and a boot menu populated from
+	  EFI loaders detected on eMMC, SD, USB, NVMe and SATA storage.
 
 config RK3588_FREEBSD_SHOW_LOGO
 	bool "Show the RK3588 FreeBSD boot logo"
