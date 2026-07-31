@@ -8,7 +8,14 @@ config RK3588_FREEBSD_BOOT
 	select CMD_BOOTMENU
 	select CMD_FS_GENERIC
 	select CMD_IMPORTENV
+	select CMD_SAVEENV
 	select DISPLAY_ROCKCHIP_HDMI_QP
+	select ENV_IS_IN_MMC
+	select ENV_IS_IN_SPI_FLASH
+	select ENV_IS_NOWHERE
+	select ENV_REDUNDANT
+	select ENV_SECT_SIZE_AUTO
+	select FAT_WRITE
 	select FS_FAT
 	select VIDEO
 	select VIDEO_ROCKCHIP

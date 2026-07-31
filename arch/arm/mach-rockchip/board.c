@@ -12,6 +12,7 @@
 #include <clk.h>
 #include <cpu_func.h>
 #include <env.h>
+#include <env_internal.h>
 #include <dm.h>
 #include <dm/uclass-internal.h>
 #include <efi_loader.h>
@@ -210,6 +211,28 @@ static ulong rockchip_get_boot_storage(void)
 
 	return 0;
 }
+
+#if IS_ENABLED(CONFIG_ROCKCHIP_RK3588) && \
+	IS_ENABLED(CONFIG_RK3588_FREEBSD_BOOT)
+enum env_location arch_env_get_location(enum env_operation op, int prio)
+{
+	ulong storage;
+
+	if (prio)
+		return ENVL_UNKNOWN;
+
+	storage = rockchip_get_boot_storage();
+	if ((storage == ROCKCHIP_BOOT_STORAGE_EMMC ||
+	     storage == ROCKCHIP_BOOT_STORAGE_SD) &&
+	    IS_ENABLED(CONFIG_ENV_IS_IN_MMC))
+		return ENVL_MMC;
+	if (storage == ROCKCHIP_BOOT_STORAGE_SPI_NOR &&
+	    IS_ENABLED(CONFIG_ENV_IS_IN_SPI_FLASH))
+		return ENVL_SPI_FLASH;
+
+	return ENVL_NOWHERE;
+}
+#endif
 
 __weak int rk_board_late_init(void)
 {
