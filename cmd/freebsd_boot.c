@@ -22,13 +22,15 @@ static const char *freebsd_parse_number(const char *p, unsigned int max,
 					bool zero_ok)
 {
 	unsigned int value = 0;
+	unsigned int digit;
 
 	if (!isdigit(*p))
 		return NULL;
 	do {
-		value = value * 10 + *p++ - '0';
-		if (value > max)
+		digit = *p++ - '0';
+		if (value > (max - digit) / 10)
 			return NULL;
+		value = value * 10 + digit;
 	} while (isdigit(*p));
 
 	return value || zero_ok ? p : NULL;
