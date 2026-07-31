@@ -3,6 +3,8 @@ if ROCKCHIP_RK3588
 config RK3588_FREEBSD_BOOT
 	bool "FreeBSD boot environment"
 	default y
+	select AHCI
+	select AHCI_PCI
 	select BMP_32BPP
 	select CMD_BMP
 	select CMD_BOOTMENU
@@ -10,6 +12,7 @@ config RK3588_FREEBSD_BOOT
 	select CMD_IMPORTENV
 	select CMD_SAVEENV
 	select DISPLAY_ROCKCHIP_HDMI_QP
+	select DWC_AHCI
 	select ENV_IS_IN_MMC
 	select ENV_IS_IN_SPI_FLASH
 	select ENV_IS_NOWHERE
@@ -17,6 +20,7 @@ config RK3588_FREEBSD_BOOT
 	select ENV_SECT_SIZE_AUTO
 	select FAT_WRITE
 	select FS_FAT
+	select SCSI
 	select VIDEO
 	select VIDEO_ROCKCHIP
 	help
