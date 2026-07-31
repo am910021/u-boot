@@ -14,6 +14,7 @@
 	"bootdelay=0\0" \
 	"bootmenu_title=*** FreeBSD U-Boot Boot Menu ***\0" \
 	"bootmenu_delay=3\0" \
+	"logo_delay=0\0" \
 	"bootmenu_config=/bootmenu.env\0" \
 	"freebsd_default_boot=auto\0" \
 	"freebsd_loader=/EFI/FreeBSD/loader.efi\0" \
@@ -24,7 +25,8 @@
 			"if load mmc ${bootmenu_mmcdev}:1 ${scriptaddr} " \
 					"${bootmenu_config}; then " \
 				"if env import -t -r ${scriptaddr} ${filesize} " \
-						"bootmenu_title bootmenu_delay; then " \
+						"bootmenu_title bootmenu_delay " \
+						"logo_delay; then " \
 					"echo \"Loaded ${bootmenu_config} from mmc " \
 						"${bootmenu_mmcdev}:1\"; " \
 					"setenv bootmenu_loaded 1; " \
@@ -76,7 +78,9 @@
 			"fi; " \
 		"fi; " \
 		"if test \"${logo_loaded}\" = \"1\"; then " \
-			"if bmp display ${loadaddr} m m; then sleep 3; fi; " \
+			"if bmp display ${loadaddr} m m; then " \
+				"sleep ${logo_delay}; " \
+			"fi; " \
 		"fi; " \
 		"setenv logo_loaded; setenv logo_mmcdev\0" \
 	"boot_freebsd_target=" \
