@@ -15,8 +15,28 @@
 
 #define FREEBSD_LOADER_PATH	"/EFI/FreeBSD/loader.efi"
 #define FREEBSD_REQUEST_PATH	"/uboot-env.request"
-#define FREEBSD_REQUEST_PREFIX	"freebsd_default_boot="
+#define FREEBSD_REQUEST_SIZE	512
 #define FREEBSD_MAX_ENTRIES	96
+
+enum freebsd_request_key {
+	FREEBSD_REQUEST_DEFAULT,
+	FREEBSD_REQUEST_TITLE,
+	FREEBSD_REQUEST_DELAY,
+	FREEBSD_REQUEST_LOGO_DELAY,
+	FREEBSD_REQUEST_KEYS,
+};
+
+static const char *const freebsd_request_names[FREEBSD_REQUEST_KEYS] = {
+	[FREEBSD_REQUEST_DEFAULT] = "freebsd_default_boot",
+	[FREEBSD_REQUEST_TITLE] = "bootmenu_title",
+	[FREEBSD_REQUEST_DELAY] = "bootmenu_delay",
+	[FREEBSD_REQUEST_LOGO_DELAY] = "logo_delay",
+};
+
+struct freebsd_request {
+	char value[FREEBSD_REQUEST_KEYS][96];
+	bool present[FREEBSD_REQUEST_KEYS];
+};
 
 static const char *freebsd_parse_number(const char *p, unsigned int max,
 					bool zero_ok)
@@ -64,17 +84,65 @@ static bool freebsd_valid_target(const char *value)
 	return false;
 }
 
-static int freebsd_read_request(struct blk_desc *desc, int part,
-				char *value, size_t value_size)
+static bool freebsd_valid_delay(const char *value)
 {
-	char request[96];
+	const char *end = freebsd_parse_number(value, 99, true);
+
+	return end && !*end;
+}
+
+static bool freebsd_valid_title(const char *value)
+{
+	const char *p;
+	size_t len = strlen(value);
+
+	if (!len || len > 80)
+		return false;
+	for (p = value; *p; p++) {
+		if (!isprint((unsigned char)*p))
+			return false;
+	}
+
+	return true;
+}
+
+static int freebsd_request_set(struct freebsd_request *request,
+			       char *name, const char *value)
+{
+	int key;
+
+	for (key = 0; key < FREEBSD_REQUEST_KEYS; key++) {
+		if (!strcmp(name, freebsd_request_names[key]))
+			break;
+	}
+	if (key == FREEBSD_REQUEST_KEYS || request->present[key] ||
+	    strlen(value) >= sizeof(request->value[key]))
+		return -EINVAL;
+	if ((key == FREEBSD_REQUEST_DEFAULT && !freebsd_valid_target(value)) ||
+	    (key == FREEBSD_REQUEST_TITLE && !freebsd_valid_title(value)) ||
+	    ((key == FREEBSD_REQUEST_DELAY ||
+	      key == FREEBSD_REQUEST_LOGO_DELAY) && !freebsd_valid_delay(value)))
+		return -EINVAL;
+
+	strlcpy(request->value[key], value, sizeof(request->value[key]));
+	request->present[key] = true;
+	return 0;
+}
+
+static int freebsd_read_request(struct blk_desc *desc, int part,
+				struct freebsd_request *parsed)
+{
+	char request[FREEBSD_REQUEST_SIZE];
 	loff_t actread;
 	loff_t size;
-	char *end;
+	char *cursor;
+	char *equal;
+	char *line;
+	bool any = false;
 
 	if (fs_set_blk_dev_with_part(desc, part) ||
 	    fs_size(FREEBSD_REQUEST_PATH, &size) ||
-	    size <= strlen(FREEBSD_REQUEST_PREFIX) ||
+	    size <= 0 ||
 	    size >= sizeof(request))
 		return -ENOENT;
 	if (fs_set_blk_dev_with_part(desc, part) ||
@@ -82,77 +150,147 @@ static int freebsd_read_request(struct blk_desc *desc, int part,
 		    &actread) ||
 	    actread != size)
 		return -EIO;
+	if (memchr(request, '\0', size))
+		return -EINVAL;
 
 	request[size] = '\0';
-	end = request + size;
-	while (end > request && (end[-1] == '\n' || end[-1] == '\r'))
-		*--end = '\0';
+	memset(parsed, 0, sizeof(*parsed));
+	cursor = request;
+	while ((line = strsep(&cursor, "\n")) != NULL) {
+		size_t len = strlen(line);
 
-	if (strncmp(request, FREEBSD_REQUEST_PREFIX,
-		    strlen(FREEBSD_REQUEST_PREFIX)))
-		return -EINVAL;
-	strlcpy(value, request + strlen(FREEBSD_REQUEST_PREFIX), value_size);
+		if (len && line[len - 1] == '\r')
+			line[--len] = '\0';
+		if (!len)
+			continue;
+		equal = strchr(line, '=');
+		if (!equal || equal == line)
+			return -EINVAL;
+		*equal++ = '\0';
+		if (freebsd_request_set(parsed, line, equal))
+			return -EINVAL;
+		any = true;
+	}
 
-	return freebsd_valid_target(value) ? 0 : -EINVAL;
+	return any ? 0 : -EINVAL;
 }
 
 static int freebsd_apply_request(struct blk_desc *desc, int part)
 {
+	struct freebsd_request request;
+	char *saved[FREEBSD_REQUEST_KEYS] = {};
+	bool changed[FREEBSD_REQUEST_KEYS] = {};
 	const char *current;
-	char *saved = NULL;
-	char value[32];
+	int key;
 	int ret;
 
-	ret = freebsd_read_request(desc, part, value, sizeof(value));
+	ret = freebsd_read_request(desc, part, &request);
 	if (ret)
 		return ret;
 
-	current = env_get("freebsd_default_boot");
-	if (current) {
-		saved = strdup(current);
-		if (!saved)
-			return -ENOMEM;
+	for (key = 0; key < FREEBSD_REQUEST_KEYS; key++) {
+		if (!request.present[key])
+			continue;
+		current = env_get(freebsd_request_names[key]);
+		if (current && !strcmp(current, request.value[key]))
+			continue;
+		if (current) {
+			saved[key] = strdup(current);
+			if (!saved[key]) {
+				ret = -ENOMEM;
+				goto out;
+			}
+		}
+		changed[key] = true;
 	}
 
-	ret = env_set("freebsd_default_boot", value);
-	if (!ret)
-		ret = env_save();
-	if (ret) {
-		env_set("freebsd_default_boot", saved);
-		free(saved);
-		printf("Keeping %s on %s%d:%d: saveenv failed\n",
-		       FREEBSD_REQUEST_PATH,
-		       blk_get_uclass_name(desc->uclass_id), desc->devnum, part);
-		return ret;
+	for (key = 0; key < FREEBSD_REQUEST_KEYS; key++) {
+		if (changed[key] && env_set(freebsd_request_names[key],
+					    request.value[key])) {
+			ret = -ENOMEM;
+			goto restore;
+		}
 	}
-	free(saved);
-
-	if (fs_set_blk_dev_with_part(desc, part) ||
-	    fs_unlink(FREEBSD_REQUEST_PATH)) {
-		printf("Applied %s=%s; could not remove %s from %s%d:%d\n",
-		       "freebsd_default_boot", value, FREEBSD_REQUEST_PATH,
-		       blk_get_uclass_name(desc->uclass_id), desc->devnum, part);
-	} else {
-		printf("Applied %s=%s from %s%d:%d\n",
-		       "freebsd_default_boot", value,
-		       blk_get_uclass_name(desc->uclass_id), desc->devnum, part);
+	ret = 0;
+	for (key = 0; key < FREEBSD_REQUEST_KEYS; key++) {
+		if (changed[key]) {
+			ret = env_save();
+			break;
+		}
 	}
+	if (ret)
+		goto restore;
 
-	return 0;
+	printf("Accepted %s from %s%d:%d\n", FREEBSD_REQUEST_PATH,
+	       blk_get_uclass_name(desc->uclass_id), desc->devnum, part);
+	goto out;
+
+restore:
+	for (key = 0; key < FREEBSD_REQUEST_KEYS; key++) {
+		if (changed[key])
+			env_set(freebsd_request_names[key], saved[key]);
+	}
+	printf("Keeping %s on %s%d:%d: environment update failed\n",
+	       FREEBSD_REQUEST_PATH,
+	       blk_get_uclass_name(desc->uclass_id), desc->devnum, part);
+
+out:
+	for (key = 0; key < FREEBSD_REQUEST_KEYS; key++)
+		free(saved[key]);
+	return ret;
 }
 
 static bool freebsd_request_on_desc(struct blk_desc *desc)
 {
 	struct disk_partition info;
+	int ret;
 	int part;
 
 	for (part = 1; part <= MAX_SEARCH_PARTITIONS; part++) {
-		if (!part_get_info(desc, part, &info) &&
-		    !freebsd_apply_request(desc, part))
+		if (part_get_info(desc, part, &info))
+			continue;
+		ret = freebsd_apply_request(desc, part);
+		if (!ret)
 			return true;
+		if (ret == -EINVAL)
+			printf("Ignoring invalid %s on %s%d:%d\n",
+			       FREEBSD_REQUEST_PATH,
+			       blk_get_uclass_name(desc->uclass_id),
+			       desc->devnum, part);
 	}
 
 	return false;
+}
+
+static void freebsd_remove_request(struct blk_desc *desc, int part)
+{
+	if (fs_set_blk_dev_with_part(desc, part) ||
+	    !fs_exists(FREEBSD_REQUEST_PATH))
+		return;
+	if (fs_unlink(FREEBSD_REQUEST_PATH))
+		printf("Could not remove %s from %s%d:%d\n",
+		       FREEBSD_REQUEST_PATH,
+		       blk_get_uclass_name(desc->uclass_id), desc->devnum, part);
+}
+
+static void freebsd_remove_request_uclass(enum uclass_id id)
+{
+	struct disk_partition info;
+	struct blk_desc *desc;
+	int devnum;
+	int part;
+	int max;
+
+	max = blk_find_max_devnum(id);
+	for (devnum = 0; devnum <= max; devnum++) {
+		desc = blk_get_devnum_by_uclass_id(id, devnum);
+		if (!desc)
+			continue;
+		for (part = 1; part <= MAX_SEARCH_PARTITIONS; part++) {
+			if (!part_get_info(desc, part, &info))
+				freebsd_remove_request(desc, part);
+		}
+	}
 }
 
 static void freebsd_clear_menu(void)
@@ -297,6 +435,7 @@ static int freebsd_build_menu(void)
 	bool usb_ready;
 	bool nvme_ready;
 	bool scsi_ready;
+	bool request_applied;
 
 	freebsd_clear_menu();
 	mmc_initialize(NULL);
@@ -305,12 +444,20 @@ static int freebsd_build_menu(void)
 	nvme_ready = IS_ENABLED(CONFIG_NVME) && !nvme_scan_namespace();
 	scsi_ready = IS_ENABLED(CONFIG_SCSI) && !scsi_scan(false);
 
-	if (!freebsd_request_mmc(false) &&
-	    !freebsd_request_mmc(true) &&
-	    !(usb_ready && freebsd_request_uclass(UCLASS_USB)) &&
-	    !(nvme_ready && freebsd_request_uclass(UCLASS_NVME)) &&
-	    scsi_ready)
-		freebsd_request_uclass(UCLASS_SCSI);
+	request_applied = freebsd_request_mmc(false) ||
+		freebsd_request_mmc(true) ||
+		(usb_ready && freebsd_request_uclass(UCLASS_USB)) ||
+		(nvme_ready && freebsd_request_uclass(UCLASS_NVME)) ||
+		(scsi_ready && freebsd_request_uclass(UCLASS_SCSI));
+	if (request_applied) {
+		freebsd_remove_request_uclass(UCLASS_MMC);
+		if (usb_ready)
+			freebsd_remove_request_uclass(UCLASS_USB);
+		if (nvme_ready)
+			freebsd_remove_request_uclass(UCLASS_NVME);
+		if (scsi_ready)
+			freebsd_remove_request_uclass(UCLASS_SCSI);
+	}
 
 	wanted = env_get("freebsd_default_boot");
 	freebsd_scan_mmc(false, wanted, &index, &default_index);
