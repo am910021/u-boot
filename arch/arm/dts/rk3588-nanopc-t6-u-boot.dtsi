@@ -6,6 +6,11 @@
 
 #include "rk3588-u-boot.dtsi"
 
+&usb_host0_xhci {
+	dr_mode = "host";
+	vbus-supply = <&vbus5v0_typec>;
+};
+
 &fspim1_pins {
 	bootph-pre-ram;
 	bootph-some-ram;
