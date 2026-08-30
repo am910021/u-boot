@@ -51,6 +51,10 @@
 		"if load ${freebsd_iface} ${freebsd_devpart} ${fdt_addr_r} " \
 				"${freebsd_dtb}; then " \
 			"fdt addr ${fdt_addr_r}; " \
+			"fdt set /chosen freebsd,boot-targets " \
+				"\"${freebsd_boot_targets}\"; " \
+			"fdt set /chosen freebsd,boot-target " \
+				"\"${freebsd_iface}${freebsd_devpart}\"; " \
 			"if load ${freebsd_iface} ${freebsd_devpart} " \
 					"${kernel_addr_r} ${freebsd_loader}; then " \
 				"bootefi ${kernel_addr_r} ${fdt_addr_r}; " \

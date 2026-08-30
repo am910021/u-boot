@@ -17,6 +17,7 @@
 #define FREEBSD_REQUEST_PATH	"/uboot-env.request"
 #define FREEBSD_REQUEST_SIZE	512
 #define FREEBSD_MAX_ENTRIES	96
+#define FREEBSD_TARGETS_SIZE	(FREEBSD_MAX_ENTRIES * 16)
 
 enum freebsd_request_key {
 	FREEBSD_REQUEST_DEFAULT,
@@ -306,6 +307,7 @@ static void freebsd_clear_menu(void)
 
 static int freebsd_add_entry(const char *label, const char *ifname,
 			     int devnum, int part, const char *wanted,
+			     char *targets, size_t targets_size,
 			     int *index, int *default_index)
 {
 	char command[192];
@@ -327,9 +329,15 @@ static int freebsd_add_entry(const char *label, const char *ifname,
 		 "run boot_freebsd_target", ifname, devpart);
 	snprintf(value, sizeof(value), "FreeBSD - %s (%s)=%s",
 		 label, target, command);
+	if (strlen(targets) + strlen(target) + (targets[0] ? 1 : 0) >=
+	    targets_size)
+		return -ENOSPC;
 
 	if (env_set(name, value))
 		return -ENOMEM;
+	if (targets[0])
+		strlcat(targets, ",", targets_size);
+	strlcat(targets, target, targets_size);
 	if (wanted && !strcmp(wanted, target))
 		*default_index = *index;
 
@@ -338,7 +346,8 @@ static int freebsd_add_entry(const char *label, const char *ifname,
 }
 
 static void freebsd_scan_desc(struct blk_desc *desc, const char *label,
-			      const char *wanted, int *index,
+			      const char *wanted, char *targets,
+			      size_t targets_size, int *index,
 			      int *default_index)
 {
 	struct disk_partition info;
@@ -353,13 +362,15 @@ static void freebsd_scan_desc(struct blk_desc *desc, const char *label,
 		if (!fs_exists(FREEBSD_LOADER_PATH))
 			continue;
 		if (freebsd_add_entry(label, ifname, desc->devnum, part,
-				      wanted, index, default_index))
+				      wanted, targets, targets_size, index,
+				      default_index))
 			return;
 	}
 }
 
 static void freebsd_scan_uclass(enum uclass_id id, const char *label,
-				const char *wanted, int *index,
+				const char *wanted, char *targets,
+				size_t targets_size, int *index,
 				int *default_index)
 {
 	struct blk_desc *desc;
@@ -370,8 +381,8 @@ static void freebsd_scan_uclass(enum uclass_id id, const char *label,
 	for (devnum = 0; devnum <= max; devnum++) {
 		desc = blk_get_devnum_by_uclass_id(id, devnum);
 		if (desc)
-			freebsd_scan_desc(desc, label, wanted, index,
-					   default_index);
+			freebsd_scan_desc(desc, label, wanted, targets,
+					  targets_size, index, default_index);
 	}
 }
 
@@ -391,7 +402,8 @@ static bool freebsd_request_uclass(enum uclass_id id)
 	return false;
 }
 
-static void freebsd_scan_mmc(bool removable, const char *wanted, int *index,
+static void freebsd_scan_mmc(bool removable, const char *wanted, char *targets,
+			     size_t targets_size, int *index,
 			     int *default_index)
 {
 	struct blk_desc *desc;
@@ -404,7 +416,7 @@ static void freebsd_scan_mmc(bool removable, const char *wanted, int *index,
 		if (!desc || !!desc->removable != removable)
 			continue;
 		freebsd_scan_desc(desc, removable ? "SD" : "eMMC", wanted,
-				   index, default_index);
+				   targets, targets_size, index, default_index);
 	}
 }
 
@@ -429,6 +441,7 @@ static bool freebsd_request_mmc(bool removable)
 static int freebsd_build_menu(void)
 {
 	const char *wanted;
+	char targets[FREEBSD_TARGETS_SIZE] = {};
 	char value[16];
 	int default_index = 0;
 	int index = 0;
@@ -460,18 +473,22 @@ static int freebsd_build_menu(void)
 	}
 
 	wanted = env_get("freebsd_default_boot");
-	freebsd_scan_mmc(false, wanted, &index, &default_index);
-	freebsd_scan_mmc(true, wanted, &index, &default_index);
+	freebsd_scan_mmc(false, wanted, targets, sizeof(targets), &index,
+			 &default_index);
+	freebsd_scan_mmc(true, wanted, targets, sizeof(targets), &index,
+			 &default_index);
 
 	if (usb_ready)
-		freebsd_scan_uclass(UCLASS_USB, "USB", wanted, &index,
-				   &default_index);
+		freebsd_scan_uclass(UCLASS_USB, "USB", wanted, targets,
+				    sizeof(targets), &index, &default_index);
 	if (nvme_ready)
-		freebsd_scan_uclass(UCLASS_NVME, "NVMe", wanted, &index,
-				   &default_index);
+		freebsd_scan_uclass(UCLASS_NVME, "NVMe", wanted, targets,
+				    sizeof(targets), &index, &default_index);
 	if (scsi_ready)
-		freebsd_scan_uclass(UCLASS_SCSI, "SATA/SCSI", wanted, &index,
-				   &default_index);
+		freebsd_scan_uclass(UCLASS_SCSI, "SATA/SCSI", wanted, targets,
+				    sizeof(targets), &index, &default_index);
+	if (env_set("freebsd_boot_targets", targets))
+		return -ENOMEM;
 
 	snprintf(value, sizeof(value), "%d", default_index);
 	env_set("bootmenu_default", value);
