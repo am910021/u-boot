@@ -184,6 +184,8 @@ static int freebsd_add_entry(const char *label, const char *ifname,
 	snprintf(name, sizeof(name), "bootmenu_%d", *index);
 	snprintf(command, sizeof(command),
 		 "setenv freebsd_iface %s; setenv freebsd_devpart %s; "
+		 "echo \"RK3588-BOOT-TARGET "
+		 "${freebsd_iface}${freebsd_devpart}\"; "
 		 "run boot_freebsd_target", ifname, devpart);
 	snprintf(value, sizeof(value), "FreeBSD - %s (%s)=%s",
 		 label, target, command);
