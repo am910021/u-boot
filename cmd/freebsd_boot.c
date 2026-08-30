@@ -298,7 +298,8 @@ static int freebsd_build_menu(void)
 
 	freebsd_clear_menu();
 	mmc_initialize(NULL);
-	usb_ready = IS_ENABLED(CONFIG_USB_STORAGE) && !usb_init();
+	usb_ready = IS_ENABLED(CONFIG_USB_STORAGE) && !usb_init() &&
+		usb_stor_scan(1) >= 0;
 	nvme_ready = IS_ENABLED(CONFIG_NVME) && !nvme_scan_namespace();
 	scsi_ready = IS_ENABLED(CONFIG_SCSI) && !scsi_scan(false);
 
