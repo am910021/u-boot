@@ -51,6 +51,7 @@
 		"if load ${freebsd_iface} ${freebsd_devpart} ${fdt_addr_r} " \
 				"${freebsd_dtb}; then " \
 			"fdt addr ${fdt_addr_r}; " \
+			"fdt resize 100; " \
 			"fdt set /chosen freebsd,boot-targets " \
 				"\"${freebsd_boot_targets}\"; " \
 			"fdt set /chosen freebsd,boot-target " \
