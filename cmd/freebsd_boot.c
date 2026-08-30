@@ -440,6 +440,9 @@ static bool freebsd_request_mmc(bool removable)
 
 static int freebsd_build_menu(void)
 {
+	static const char *const runtime_defaults[] = {
+		"boot_freebsd_target",
+	};
 	const char *wanted;
 	char targets[FREEBSD_TARGETS_SIZE] = {};
 	char value[16];
@@ -450,6 +453,9 @@ static int freebsd_build_menu(void)
 	bool scsi_ready;
 	bool request_applied;
 
+	/* Do not let a saved environment pin an old firmware implementation. */
+	env_set_default_vars(ARRAY_SIZE(runtime_defaults),
+			     (char * const *)runtime_defaults, 0);
 	freebsd_clear_menu();
 	mmc_initialize(NULL);
 	usb_ready = IS_ENABLED(CONFIG_USB_STORAGE) && !usb_init() &&
