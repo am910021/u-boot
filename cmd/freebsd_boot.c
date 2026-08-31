@@ -268,7 +268,8 @@ static void freebsd_remove_request(struct blk_desc *desc, int part)
 	if (fs_set_blk_dev_with_part(desc, part) ||
 	    !fs_exists(FREEBSD_REQUEST_PATH))
 		return;
-	if (fs_unlink(FREEBSD_REQUEST_PATH))
+	if (fs_set_blk_dev_with_part(desc, part) ||
+	    fs_unlink(FREEBSD_REQUEST_PATH))
 		printf("Could not remove %s from %s%d:%d\n",
 		       FREEBSD_REQUEST_PATH,
 		       blk_get_uclass_name(desc->uclass_id), desc->devnum, part);
