@@ -4,6 +4,7 @@
 #include <command.h>
 #include <env.h>
 #include <fs.h>
+#include <init.h>
 #include <malloc.h>
 #include <mapmem.h>
 #include <mmc.h>
@@ -461,6 +462,8 @@ static int freebsd_build_menu(void)
 	mmc_initialize(NULL);
 	usb_ready = IS_ENABLED(CONFIG_USB_STORAGE) && !usb_init() &&
 		usb_stor_scan(1) >= 0;
+	if (IS_ENABLED(CONFIG_PCI))
+		pci_init();
 	nvme_ready = IS_ENABLED(CONFIG_NVME) && !nvme_scan_namespace();
 	scsi_ready = IS_ENABLED(CONFIG_SCSI) && !scsi_scan(false);
 
