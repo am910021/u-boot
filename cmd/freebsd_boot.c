@@ -12,13 +12,31 @@
 #include <part.h>
 #include <scsi.h>
 #include <usb.h>
+#include <asm/cache.h>
 #include <linux/ctype.h>
+#if IS_ENABLED(CONFIG_RK3588_FREEBSD_SPI_UPDATE)
+#include <hexdump.h>
+#include <u-boot/sha256.h>
+#endif
 
 #define FREEBSD_LOADER_PATH	"/EFI/FreeBSD/loader.efi"
 #define FREEBSD_REQUEST_PATH	"/uboot-env.request"
 #define FREEBSD_REQUEST_SIZE	512
 #define FREEBSD_MAX_ENTRIES	96
 #define FREEBSD_TARGETS_SIZE	(FREEBSD_MAX_ENTRIES * 16)
+
+#if IS_ENABLED(CONFIG_RK3588_FREEBSD_SPI_UPDATE)
+#define FREEBSD_SPI_REQUEST_PATH	"/uboot-spi-update.request"
+#define FREEBSD_SPI_IMAGE_PATH		"/firmware-update.bin"
+#define FREEBSD_SPI_REQUEST_SIZE	512
+
+struct freebsd_spi_update {
+	struct blk_desc *desc;
+	int part;
+	void *image;
+	u8 digest[SHA256_SUM_LEN];
+};
+#endif
 
 enum freebsd_request_key {
 	FREEBSD_REQUEST_DEFAULT,
@@ -264,16 +282,20 @@ static bool freebsd_request_on_desc(struct blk_desc *desc)
 	return false;
 }
 
-static void freebsd_remove_request(struct blk_desc *desc, int part)
+static int freebsd_remove_path(struct blk_desc *desc, int part,
+			       const char *path)
 {
 	if (fs_set_blk_dev_with_part(desc, part) ||
-	    !fs_exists(FREEBSD_REQUEST_PATH))
-		return;
+	    !fs_exists(path))
+		return 0;
 	if (fs_set_blk_dev_with_part(desc, part) ||
-	    fs_unlink(FREEBSD_REQUEST_PATH))
-		printf("Could not remove %s from %s%d:%d\n",
-		       FREEBSD_REQUEST_PATH,
+	    fs_unlink(path)) {
+		printf("Could not remove %s from %s%d:%d\n", path,
 		       blk_get_uclass_name(desc->uclass_id), desc->devnum, part);
+		return -EIO;
+	}
+
+	return 0;
 }
 
 static void freebsd_remove_request_uclass(enum uclass_id id)
@@ -291,10 +313,215 @@ static void freebsd_remove_request_uclass(enum uclass_id id)
 			continue;
 		for (part = 1; part <= MAX_SEARCH_PARTITIONS; part++) {
 			if (!part_get_info(desc, part, &info))
-				freebsd_remove_request(desc, part);
+				freebsd_remove_path(desc, part,
+						    FREEBSD_REQUEST_PATH);
 		}
 	}
 }
+
+#if IS_ENABLED(CONFIG_RK3588_FREEBSD_SPI_UPDATE)
+static int freebsd_read_spi_request(struct blk_desc *desc, int part,
+				    struct freebsd_spi_update *update)
+{
+	char request[FREEBSD_SPI_REQUEST_SIZE];
+	bool have_version = false;
+	bool have_size = false;
+	bool have_digest = false;
+	loff_t actread;
+	loff_t image_size;
+	loff_t size;
+	char *cursor;
+	char *equal;
+	char *end;
+	char *line;
+	ulong value;
+	u8 digest[SHA256_SUM_LEN];
+	int ret = -EINVAL;
+
+	if (fs_set_blk_dev_with_part(desc, part) ||
+	    fs_size(FREEBSD_SPI_REQUEST_PATH, &size) || size <= 0 ||
+	    size >= sizeof(request))
+		return -ENOENT;
+	if (fs_set_blk_dev_with_part(desc, part) ||
+	    fs_read(FREEBSD_SPI_REQUEST_PATH, map_to_sysmem(request), 0, size,
+		    &actread) || actread != size)
+		return -EIO;
+	if (memchr(request, '\0', size))
+		return -EINVAL;
+
+	request[size] = '\0';
+	cursor = request;
+	while ((line = strsep(&cursor, "\n")) != NULL) {
+		size_t len = strlen(line);
+
+		if (len && line[len - 1] == '\r')
+			line[--len] = '\0';
+		if (!len)
+			continue;
+		equal = strchr(line, '=');
+		if (!equal || equal == line)
+			return -EINVAL;
+		*equal++ = '\0';
+		if (!strcmp(line, "version")) {
+			if (have_version || strcmp(equal, "1"))
+				return -EINVAL;
+			have_version = true;
+		} else if (!strcmp(line, "size")) {
+			if (have_size)
+				return -EINVAL;
+			value = simple_strtoul(equal, &end, 10);
+			if (!*equal || *end || value != CONFIG_ENV_OFFSET)
+				return -EINVAL;
+			have_size = true;
+		} else if (!strcmp(line, "sha256")) {
+			if (have_digest || strlen(equal) != SHA256_SUM_LEN * 2 ||
+			    hex2bin(update->digest, equal, SHA256_SUM_LEN))
+				return -EINVAL;
+			have_digest = true;
+		} else {
+			return -EINVAL;
+		}
+	}
+	if (!have_version || !have_size || !have_digest)
+		return -EINVAL;
+	if (fs_set_blk_dev_with_part(desc, part) ||
+	    fs_size(FREEBSD_SPI_IMAGE_PATH, &image_size) ||
+	    image_size != CONFIG_ENV_OFFSET)
+		return -EINVAL;
+
+	update->image = memalign(ARCH_DMA_MINALIGN, image_size);
+	if (!update->image)
+		return -ENOMEM;
+	if (fs_set_blk_dev_with_part(desc, part) ||
+	    fs_read(FREEBSD_SPI_IMAGE_PATH, map_to_sysmem(update->image), 0,
+		    image_size, &actread) || actread != image_size) {
+		ret = -EIO;
+		goto fail;
+	}
+	sha256_csum_wd(update->image, image_size, digest, CHUNKSZ_SHA256);
+	if (memcmp(update->digest, digest, sizeof(digest)))
+		goto fail;
+
+	update->desc = desc;
+	update->part = part;
+	return 0;
+
+fail:
+	free(update->image);
+	update->image = NULL;
+	return ret;
+}
+
+static bool freebsd_find_spi_update_desc(struct blk_desc *desc,
+					 struct freebsd_spi_update *update)
+{
+	struct disk_partition info;
+	int part;
+	int ret;
+
+	for (part = 1; part <= MAX_SEARCH_PARTITIONS; part++) {
+		if (part_get_info(desc, part, &info))
+			continue;
+		ret = freebsd_read_spi_request(desc, part, update);
+		if (!ret)
+			return true;
+		if (ret != -ENOENT)
+			printf("Ignoring invalid %s on %s%d:%d (%d)\n",
+			       FREEBSD_SPI_REQUEST_PATH,
+			       blk_get_uclass_name(desc->uclass_id), desc->devnum,
+			       part, ret);
+	}
+
+	return false;
+}
+
+static bool freebsd_find_spi_update_uclass(enum uclass_id id,
+					   struct freebsd_spi_update *update)
+{
+	struct blk_desc *desc;
+	int devnum;
+	int max;
+
+	max = blk_find_max_devnum(id);
+	for (devnum = 0; devnum <= max; devnum++) {
+		desc = blk_get_devnum_by_uclass_id(id, devnum);
+		if (desc && freebsd_find_spi_update_desc(desc, update))
+			return true;
+	}
+
+	return false;
+}
+
+static int freebsd_apply_spi_update(bool usb_ready, bool nvme_ready,
+				    bool scsi_ready)
+{
+	struct freebsd_spi_update update = {};
+	void *verify;
+	u8 digest[SHA256_SUM_LEN];
+	ulong image_addr;
+	ulong verify_addr;
+	bool found;
+	int ret = 0;
+
+	found = freebsd_find_spi_update_uclass(UCLASS_MMC, &update) ||
+		(usb_ready && freebsd_find_spi_update_uclass(UCLASS_USB,
+							      &update)) ||
+		(nvme_ready && freebsd_find_spi_update_uclass(UCLASS_NVME,
+							       &update)) ||
+		(scsi_ready && freebsd_find_spi_update_uclass(UCLASS_SCSI,
+							       &update));
+	if (!found)
+		return 0;
+
+	printf("Verified %s from %s%d:%d\n", FREEBSD_SPI_IMAGE_PATH,
+	       blk_get_uclass_name(update.desc->uclass_id), update.desc->devnum,
+	       update.part);
+	verify = memalign(ARCH_DMA_MINALIGN, CONFIG_ENV_OFFSET);
+	if (!verify) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	if (run_command("sf probe", 0)) {
+		ret = -EIO;
+		goto out_verify;
+	}
+	if (freebsd_remove_path(update.desc, update.part,
+				 FREEBSD_SPI_REQUEST_PATH)) {
+		printf("SPI update cancelled: request is not one-shot\n");
+		goto out_verify;
+	}
+
+	image_addr = map_to_sysmem(update.image);
+	verify_addr = map_to_sysmem(verify);
+	printf("Updating SPI firmware; do not remove power\n");
+	if (run_commandf("sf update %lx 0 %x", image_addr,
+			 CONFIG_ENV_OFFSET) ||
+	    run_commandf("sf read %lx 0 %x", verify_addr,
+			 CONFIG_ENV_OFFSET)) {
+		ret = -EIO;
+		goto update_failed;
+	}
+	sha256_csum_wd(verify, CONFIG_ENV_OFFSET, digest, CHUNKSZ_SHA256);
+	if (memcmp(update.digest, digest, sizeof(digest))) {
+		ret = -EIO;
+		goto update_failed;
+	}
+
+	printf("SPI firmware read-back verification passed; resetting\n");
+	free(verify);
+	free(update.image);
+	do_reset(NULL, 0, 0, NULL);
+	return -EIO;
+
+update_failed:
+	printf("SPI UPDATE FAILED: do not reset; use the U-Boot CLI or Maskrom recovery\n");
+out_verify:
+	free(verify);
+out:
+	free(update.image);
+	return ret;
+}
+#endif
 
 static void freebsd_clear_menu(void)
 {
@@ -466,6 +693,11 @@ static int freebsd_build_menu(void)
 		pci_init();
 	nvme_ready = IS_ENABLED(CONFIG_NVME) && !nvme_scan_namespace();
 	scsi_ready = IS_ENABLED(CONFIG_SCSI) && !scsi_scan(false);
+
+#if IS_ENABLED(CONFIG_RK3588_FREEBSD_SPI_UPDATE)
+	if (freebsd_apply_spi_update(usb_ready, nvme_ready, scsi_ready))
+		return -EIO;
+#endif
 
 	request_applied = freebsd_request_mmc(false) ||
 		freebsd_request_mmc(true) ||
