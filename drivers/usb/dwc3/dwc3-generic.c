@@ -742,5 +742,5 @@ U_BOOT_DRIVER(dwc3_generic_wrapper) = {
 	.probe = dwc3_glue_probe,
 	.remove = dwc3_glue_remove,
 	.plat_auto	= sizeof(struct dwc3_glue_data),
-
+	.flags = DM_FLAG_ACTIVE_DMA,
 };
