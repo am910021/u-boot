@@ -675,7 +675,7 @@ static int freebsd_build_menu(void)
 	const char *wanted;
 	char targets[FREEBSD_TARGETS_SIZE] = {};
 	char value[16];
-	int default_index = 0;
+	int default_index = -1;
 	int index = 0;
 	bool usb_ready;
 	bool nvme_ready;
@@ -732,11 +732,22 @@ static int freebsd_build_menu(void)
 	if (env_set("freebsd_boot_targets", targets))
 		return -ENOMEM;
 
-	snprintf(value, sizeof(value), "%d", default_index);
-	env_set("bootmenu_default", value);
-
 	snprintf(value, sizeof(value), "bootmenu_%d", index);
-	env_set(value, "U-Boot CLI=exit");
+	if (env_set(value, "U-Boot CLI=exit"))
+		return -ENOMEM;
+
+	if (default_index < 0) {
+		if (wanted && strcmp(wanted, "auto")) {
+			printf("Configured FreeBSD target %s is unavailable; "
+			       "stopping at U-Boot CLI\n", wanted);
+			default_index = index;
+		} else {
+			default_index = 0;
+		}
+	}
+	snprintf(value, sizeof(value), "%d", default_index);
+	if (env_set("bootmenu_default", value))
+		return -ENOMEM;
 
 	printf("Detected %d FreeBSD boot target%s\n",
 	       index, index == 1 ? "" : "s");
