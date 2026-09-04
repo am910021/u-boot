@@ -456,7 +456,7 @@ static int freebsd_apply_spi_update(bool usb_ready, bool nvme_ready,
 				    bool scsi_ready)
 {
 	struct freebsd_spi_update update = {};
-	void *verify;
+	void *verify = NULL;
 	u8 digest[SHA256_SUM_LEN];
 	ulong image_addr;
 	ulong verify_addr;
@@ -476,11 +476,12 @@ static int freebsd_apply_spi_update(bool usb_ready, bool nvme_ready,
 	printf("Verified %s from %s%d:%d\n", FREEBSD_SPI_IMAGE_PATH,
 	       blk_get_uclass_name(update.desc->uclass_id), update.desc->devnum,
 	       update.part);
-	verify = memalign(ARCH_DMA_MINALIGN, CONFIG_ENV_OFFSET);
-	if (!verify) {
+	verify_addr = env_get_hex("ramdisk_addr_r", 0);
+	if (!verify_addr) {
 		ret = -ENOMEM;
 		goto out;
 	}
+	verify = map_sysmem(verify_addr, CONFIG_ENV_OFFSET);
 	if (run_command("sf probe", 0)) {
 		ret = -EIO;
 		goto out_verify;
@@ -492,7 +493,6 @@ static int freebsd_apply_spi_update(bool usb_ready, bool nvme_ready,
 	}
 
 	image_addr = map_to_sysmem(update.image);
-	verify_addr = map_to_sysmem(verify);
 	printf("Updating SPI firmware; do not remove power\n");
 	if (run_commandf("sf update %lx 0 %x", image_addr,
 			 CONFIG_ENV_OFFSET) ||
@@ -508,7 +508,7 @@ static int freebsd_apply_spi_update(bool usb_ready, bool nvme_ready,
 	}
 
 	printf("SPI firmware read-back verification passed; resetting\n");
-	free(verify);
+	unmap_sysmem(verify);
 	free(update.image);
 	do_reset(NULL, 0, 0, NULL);
 	return -EIO;
@@ -516,7 +516,7 @@ static int freebsd_apply_spi_update(bool usb_ready, bool nvme_ready,
 update_failed:
 	printf("SPI UPDATE FAILED: do not reset; use the U-Boot CLI or Maskrom recovery\n");
 out_verify:
-	free(verify);
+	unmap_sysmem(verify);
 out:
 	free(update.image);
 	return ret;
