@@ -15,8 +15,12 @@
 #include <asm/cache.h>
 #include <linux/ctype.h>
 #if IS_ENABLED(CONFIG_RK3588_FREEBSD_SPI_UPDATE)
+#include <dm.h>
 #include <hexdump.h>
+#include <spi_flash.h>
 #include <u-boot/sha256.h>
+#include <version.h>
+#include <linux/sizes.h>
 #endif
 
 #define FREEBSD_LOADER_PATH	"/EFI/FreeBSD/loader.efi"
@@ -29,6 +33,18 @@
 #define FREEBSD_SPI_REQUEST_PATH	"/uboot-spi-update.request"
 #define FREEBSD_SPI_IMAGE_PATH		"/firmware-update.bin"
 #define FREEBSD_SPI_REQUEST_SIZE	512
+#define FREEBSD_SPI_COMPAT_PREFIX	"RK3588-FW-COMPAT-V1:"
+#define FREEBSD_SPI_VERSION_PREFIX	"RK3588-FW-VERSION-V1:"
+
+#if CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB != 16 && \
+    CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB != 32
+#error RK3588_FREEBSD_SPI_LAYOUT_MIB must be 16 or 32
+#endif
+
+static const char freebsd_spi_compat_marker[] =
+	FREEBSD_SPI_COMPAT_PREFIX CONFIG_RK3588_FREEBSD_SPI_COMPAT;
+static const char freebsd_spi_version_marker[] =
+	FREEBSD_SPI_VERSION_PREFIX U_BOOT_VERSION;
 
 struct freebsd_spi_update {
 	struct blk_desc *desc;
@@ -36,6 +52,59 @@ struct freebsd_spi_update {
 	void *image;
 	u8 digest[SHA256_SUM_LEN];
 };
+
+static int freebsd_find_image_marker(const void *image, size_t image_size,
+				     const char *prefix, size_t prefix_size,
+				     size_t max_size,
+				     const char **marker)
+{
+	const u8 *bytes = image;
+	const char *found = NULL;
+	size_t offset;
+
+	for (offset = 0; offset + prefix_size < image_size; offset++) {
+		const char *end;
+		const char *p;
+		size_t available;
+
+		if (memcmp(bytes + offset, prefix, prefix_size))
+			continue;
+		if (found)
+			return -EEXIST;
+		available = min(max_size, image_size - offset);
+		end = memchr(bytes + offset, '\0', available);
+		if (!end || end == (const char *)bytes + offset + prefix_size)
+			return -EINVAL;
+		for (p = (const char *)bytes + offset; p < end; p++) {
+			if (!isprint((unsigned char)*p))
+				return -EINVAL;
+		}
+		found = (const char *)bytes + offset;
+	}
+	if (!found)
+		return -ENOENT;
+	*marker = found;
+	return 0;
+}
+
+static int freebsd_check_spi_capacity(void)
+{
+	struct udevice *dev;
+	struct spi_flash *flash;
+	u32 expected = CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB * SZ_1M;
+	int ret;
+
+	ret = spi_flash_probe_bus_cs(CONFIG_SF_DEFAULT_BUS,
+				     CONFIG_SF_DEFAULT_CS, &dev);
+	if (ret)
+		return ret;
+	flash = dev_get_uclass_priv(dev);
+	if (!flash)
+		return -ENODEV;
+	printf("SPI flash capacity: %u MiB; firmware layout: %u MiB\n",
+	       flash->size / SZ_1M, CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB);
+	return flash->size >= expected ? 0 : -EINVAL;
+}
 #endif
 
 enum freebsd_request_key {
@@ -456,6 +525,8 @@ static int freebsd_apply_spi_update(bool usb_ready, bool nvme_ready,
 				    bool scsi_ready)
 {
 	struct freebsd_spi_update update = {};
+	const char *candidate_compat;
+	const char *candidate_version;
 	void *verify = NULL;
 	u8 digest[SHA256_SUM_LEN];
 	ulong image_addr;
@@ -473,6 +544,38 @@ static int freebsd_apply_spi_update(bool usb_ready, bool nvme_ready,
 	if (!found)
 		return 0;
 
+	ret = freebsd_find_image_marker(update.image, CONFIG_ENV_OFFSET,
+					freebsd_spi_compat_marker,
+					sizeof(FREEBSD_SPI_COMPAT_PREFIX) - 1,
+					sizeof(freebsd_spi_compat_marker),
+					&candidate_compat);
+	if (ret || strcmp(candidate_compat, freebsd_spi_compat_marker)) {
+		if (ret)
+			printf("SPI update rejected: invalid compatibility marker (%d)\n",
+			       ret);
+		else
+			printf("SPI update rejected: firmware identity mismatch\n");
+		ret = 0;
+		goto out;
+	}
+	ret = freebsd_find_image_marker(update.image, CONFIG_ENV_OFFSET,
+					freebsd_spi_version_marker,
+					sizeof(FREEBSD_SPI_VERSION_PREFIX) - 1,
+					160,
+					&candidate_version);
+	if (ret) {
+		printf("SPI update rejected: invalid firmware version marker (%d)\n",
+		       ret);
+		ret = 0;
+		goto out;
+	}
+	printf("SPI compatibility: %s\n", candidate_compat +
+	       sizeof(FREEBSD_SPI_COMPAT_PREFIX) - 1);
+	printf("Current U-Boot: %s\n", freebsd_spi_version_marker +
+	       sizeof(FREEBSD_SPI_VERSION_PREFIX) - 1);
+	printf("Candidate U-Boot: %s\n", candidate_version +
+	       sizeof(FREEBSD_SPI_VERSION_PREFIX) - 1);
+
 	printf("Verified %s from %s%d:%d\n", FREEBSD_SPI_IMAGE_PATH,
 	       blk_get_uclass_name(update.desc->uclass_id), update.desc->devnum,
 	       update.part);
@@ -484,6 +587,12 @@ static int freebsd_apply_spi_update(bool usb_ready, bool nvme_ready,
 	verify = map_sysmem(verify_addr, CONFIG_ENV_OFFSET);
 	if (run_command("sf probe", 0)) {
 		ret = -EIO;
+		goto out_verify;
+	}
+	ret = freebsd_check_spi_capacity();
+	if (ret) {
+		printf("SPI update rejected: flash capacity mismatch (%d)\n", ret);
+		ret = 0;
 		goto out_verify;
 	}
 	if (freebsd_remove_path(update.desc, update.part,
