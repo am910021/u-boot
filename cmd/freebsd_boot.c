@@ -740,7 +740,14 @@ static bool freebsd_request_uclass(enum uclass_id id)
 	return false;
 }
 
-static void freebsd_scan_mmc(bool removable, const char *wanted, char *targets,
+static bool freebsd_mmc_is_sd(struct blk_desc *desc)
+{
+	struct mmc *mmc = find_mmc_device(desc->devnum);
+
+	return mmc ? IS_SD(mmc) : !!desc->removable;
+}
+
+static void freebsd_scan_mmc(bool sd, const char *wanted, char *targets,
 			     size_t targets_size, int *index,
 			     int *default_index)
 {
@@ -751,14 +758,14 @@ static void freebsd_scan_mmc(bool removable, const char *wanted, char *targets,
 	max = blk_find_max_devnum(UCLASS_MMC);
 	for (devnum = 0; devnum <= max; devnum++) {
 		desc = blk_get_devnum_by_uclass_id(UCLASS_MMC, devnum);
-		if (!desc || !!desc->removable != removable)
+		if (!desc || freebsd_mmc_is_sd(desc) != sd)
 			continue;
-		freebsd_scan_desc(desc, removable ? "SD" : "eMMC", wanted,
+		freebsd_scan_desc(desc, sd ? "SD" : "eMMC", wanted,
 				   targets, targets_size, index, default_index);
 	}
 }
 
-static bool freebsd_request_mmc(bool removable)
+static bool freebsd_request_mmc(bool sd)
 {
 	struct blk_desc *desc;
 	int devnum;
@@ -767,7 +774,7 @@ static bool freebsd_request_mmc(bool removable)
 	max = blk_find_max_devnum(UCLASS_MMC);
 	for (devnum = 0; devnum <= max; devnum++) {
 		desc = blk_get_devnum_by_uclass_id(UCLASS_MMC, devnum);
-		if (!desc || !!desc->removable != removable)
+		if (!desc || freebsd_mmc_is_sd(desc) != sd)
 			continue;
 		if (freebsd_request_on_desc(desc))
 			return true;
