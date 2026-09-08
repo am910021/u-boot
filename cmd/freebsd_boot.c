@@ -2,6 +2,7 @@
 
 #include <blk.h>
 #include <command.h>
+#include <dm.h>
 #include <env.h>
 #include <fs.h>
 #include <init.h>
@@ -12,10 +13,10 @@
 #include <part.h>
 #include <scsi.h>
 #include <usb.h>
+#include <wdt.h>
 #include <asm/cache.h>
 #include <linux/ctype.h>
 #if IS_ENABLED(CONFIG_RK3588_FREEBSD_SPI_UPDATE)
-#include <dm.h>
 #include <hexdump.h>
 #include <spi_flash.h>
 #include <u-boot/sha256.h>
@@ -112,6 +113,8 @@ enum freebsd_request_key {
 	FREEBSD_REQUEST_TITLE,
 	FREEBSD_REQUEST_DELAY,
 	FREEBSD_REQUEST_LOGO_DELAY,
+	FREEBSD_REQUEST_WATCHDOG_ENABLE,
+	FREEBSD_REQUEST_WATCHDOG_TIMEOUT,
 	FREEBSD_REQUEST_KEYS,
 };
 
@@ -120,6 +123,8 @@ static const char *const freebsd_request_names[FREEBSD_REQUEST_KEYS] = {
 	[FREEBSD_REQUEST_TITLE] = "bootmenu_title",
 	[FREEBSD_REQUEST_DELAY] = "bootmenu_delay",
 	[FREEBSD_REQUEST_LOGO_DELAY] = "logo_delay",
+	[FREEBSD_REQUEST_WATCHDOG_ENABLE] = "freebsd_watchdog_enable",
+	[FREEBSD_REQUEST_WATCHDOG_TIMEOUT] = "freebsd_watchdog_timeout",
 };
 
 struct freebsd_request {
@@ -195,6 +200,12 @@ static bool freebsd_valid_title(const char *value)
 	return true;
 }
 
+static bool freebsd_valid_watchdog_timeout(const char *value)
+{
+	return !strcmp(value, "15") || !strcmp(value, "30") ||
+	       !strcmp(value, "45") || !strcmp(value, "60");
+}
+
 static int freebsd_request_set(struct freebsd_request *request,
 			       char *name, const char *value)
 {
@@ -210,7 +221,11 @@ static int freebsd_request_set(struct freebsd_request *request,
 	if ((key == FREEBSD_REQUEST_DEFAULT && !freebsd_valid_target(value)) ||
 	    (key == FREEBSD_REQUEST_TITLE && !freebsd_valid_title(value)) ||
 	    ((key == FREEBSD_REQUEST_DELAY ||
-	      key == FREEBSD_REQUEST_LOGO_DELAY) && !freebsd_valid_delay(value)))
+	      key == FREEBSD_REQUEST_LOGO_DELAY) && !freebsd_valid_delay(value)) ||
+	    (key == FREEBSD_REQUEST_WATCHDOG_ENABLE &&
+	     strcmp(value, "0") && strcmp(value, "1")) ||
+	    (key == FREEBSD_REQUEST_WATCHDOG_TIMEOUT &&
+	     !freebsd_valid_watchdog_timeout(value)))
 		return -EINVAL;
 
 	strlcpy(request->value[key], value, sizeof(request->value[key]));
@@ -643,6 +658,55 @@ static void freebsd_clear_menu(void)
 	}
 }
 
+static void freebsd_configure_watchdog(void)
+{
+	const char *enabled = env_get("freebsd_watchdog_enable");
+	const char *timeout = env_get("freebsd_watchdog_timeout");
+#if CONFIG_IS_ENABLED(WDT)
+	struct udevice *dev;
+	ulong seconds;
+	int ret;
+#endif
+
+	if (!enabled) {
+		env_set("freebsd_watchdog_enable", "0");
+		enabled = "0";
+	}
+	if (!timeout) {
+		env_set("freebsd_watchdog_timeout", "60");
+		timeout = "60";
+	}
+	env_set("freebsd_watchdog_active", "0");
+
+#if CONFIG_IS_ENABLED(WDT)
+	if (uclass_get_device(UCLASS_WDT, 0, &dev)) {
+		if (!strcmp(enabled, "1"))
+			puts("U-Boot watchdog requested but no device was found\n");
+		return;
+	}
+	if (!enabled || strcmp(enabled, "1")) {
+		wdt_stop(dev);
+		puts("U-Boot watchdog: disabled\n");
+		return;
+	}
+	if (!timeout || !freebsd_valid_watchdog_timeout(timeout)) {
+		puts("U-Boot watchdog: invalid timeout; watchdog remains disabled\n");
+		wdt_stop(dev);
+		return;
+	}
+	seconds = simple_strtoul(timeout, NULL, 10);
+	ret = wdt_start(dev, seconds * 1000, 0);
+	if (ret) {
+		printf("U-Boot watchdog: start failed (%d)\n", ret);
+		return;
+	}
+	env_set("freebsd_watchdog_active", "1");
+#else
+	if (!strcmp(enabled, "1"))
+		puts("U-Boot watchdog requested but unavailable\n");
+#endif
+}
+
 static int freebsd_add_entry(const char *label, const char *ifname,
 			     int devnum, int part, const char *wanted,
 			     char *targets, size_t targets_size,
@@ -801,6 +865,7 @@ static int freebsd_build_menu(void)
 	/* Do not let a saved environment pin an old firmware implementation. */
 	env_set_default_vars(ARRAY_SIZE(runtime_defaults),
 			     (char * const *)runtime_defaults, 0);
+	freebsd_configure_watchdog();
 	freebsd_clear_menu();
 	mmc_initialize(NULL);
 	usb_ready = IS_ENABLED(CONFIG_USB_STORAGE) && !usb_init() &&
@@ -828,6 +893,7 @@ static int freebsd_build_menu(void)
 			freebsd_remove_request_uclass(UCLASS_NVME);
 		if (scsi_ready)
 			freebsd_remove_request_uclass(UCLASS_SCSI);
+		freebsd_configure_watchdog();
 	}
 
 	wanted = env_get("freebsd_default_boot");

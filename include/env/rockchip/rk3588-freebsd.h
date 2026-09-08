@@ -16,6 +16,8 @@
 	"bootmenu_delay=3\0" \
 	"logo_delay=0\0" \
 	"freebsd_default_boot=auto\0" \
+	"freebsd_watchdog_enable=0\0" \
+	"freebsd_watchdog_timeout=60\0" \
 	"freebsd_loader=/EFI/FreeBSD/loader.efi\0" \
 	"freebsd_dtb=/dtb/freebsd.dtb\0" \
 	RK3588_FREEBSD_LOGO_SETTING \
@@ -56,6 +58,10 @@
 				"\"${freebsd_boot_targets}\"; " \
 			"fdt set /chosen freebsd,boot-target " \
 				"\"${freebsd_iface}${freebsd_devpart}\"; " \
+			"fdt set /chosen freebsd,uboot-watchdog-enabled " \
+				"\"${freebsd_watchdog_active}\"; " \
+			"fdt set /chosen freebsd,uboot-watchdog-timeout " \
+				"\"${freebsd_watchdog_timeout}\"; " \
 			"if load ${freebsd_iface} ${freebsd_devpart} " \
 					"${kernel_addr_r} ${freebsd_loader}; then " \
 				"bootefi ${kernel_addr_r} ${fdt_addr_r}; " \
