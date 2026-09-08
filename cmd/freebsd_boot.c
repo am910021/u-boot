@@ -202,8 +202,7 @@ static bool freebsd_valid_title(const char *value)
 
 static bool freebsd_valid_watchdog_timeout(const char *value)
 {
-	return !strcmp(value, "15") || !strcmp(value, "30") ||
-	       !strcmp(value, "45") || !strcmp(value, "60");
+	return !strcmp(value, "60");
 }
 
 static int freebsd_request_set(struct freebsd_request *request,
@@ -658,7 +657,7 @@ static void freebsd_clear_menu(void)
 	}
 }
 
-static void freebsd_configure_watchdog(bool handoff)
+static void freebsd_configure_watchdog(void)
 {
 	const char *enabled = env_get("freebsd_watchdog_enable");
 	const char *timeout = env_get("freebsd_watchdog_timeout");
@@ -694,8 +693,7 @@ static void freebsd_configure_watchdog(bool handoff)
 		wdt_stop(dev);
 		return;
 	}
-	/* Keep slow device discovery on the validated 60-second setting. */
-	seconds = handoff ? simple_strtoul(timeout, NULL, 10) : 60;
+	seconds = simple_strtoul(timeout, NULL, 10);
 	ret = wdt_start(dev, seconds * 1000, 0);
 	if (ret) {
 		printf("U-Boot watchdog: start failed (%d)\n", ret);
@@ -866,7 +864,7 @@ static int freebsd_build_menu(void)
 	/* Do not let a saved environment pin an old firmware implementation. */
 	env_set_default_vars(ARRAY_SIZE(runtime_defaults),
 			     (char * const *)runtime_defaults, 0);
-	freebsd_configure_watchdog(false);
+	freebsd_configure_watchdog();
 	freebsd_clear_menu();
 	mmc_initialize(NULL);
 	usb_ready = IS_ENABLED(CONFIG_USB_STORAGE) && !usb_init() &&
@@ -894,8 +892,8 @@ static int freebsd_build_menu(void)
 			freebsd_remove_request_uclass(UCLASS_NVME);
 		if (scsi_ready)
 			freebsd_remove_request_uclass(UCLASS_SCSI);
+		freebsd_configure_watchdog();
 	}
-	freebsd_configure_watchdog(true);
 
 	wanted = env_get("freebsd_default_boot");
 	freebsd_scan_mmc(false, wanted, targets, sizeof(targets), &index,
