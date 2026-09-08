@@ -67,6 +67,8 @@
 					"\"${freebsd_firmware_compat}\"; " \
 				"fdt set /chosen freebsd,uboot-firmware-size " \
 					"\"${freebsd_firmware_size}\"; " \
+				"fdt set /chosen freebsd,uboot-firmware-storage " \
+					"\"${freebsd_firmware_storage}\"; " \
 			"fi; " \
 			"if load ${freebsd_iface} ${freebsd_devpart} " \
 					"${kernel_addr_r} ${freebsd_loader}; then " \

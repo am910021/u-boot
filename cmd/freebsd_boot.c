@@ -36,6 +36,10 @@
 #define FREEBSD_SPI_REQUEST_SIZE	512
 #define FREEBSD_SPI_COMPAT_PREFIX	"RK3588-FW-COMPAT-V1:"
 #define FREEBSD_SPI_VERSION_PREFIX	"RK3588-FW-VERSION-V1:"
+#define FREEBSD_FW_TARGET_PREFIX		"RK3588-FW-TARGET-V1:"
+#define FREEBSD_FW_TARGET_SECTOR_SIZE	512
+#define FREEBSD_SPI_16M_UPDATE_SIZE	(16 * SZ_1M - SZ_512K)
+#define FREEBSD_SPI_32M_UPDATE_SIZE	(32 * SZ_1M - SZ_512K)
 
 #if CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB != 16 && \
     CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB != 32
@@ -51,8 +55,12 @@ struct freebsd_spi_update {
 	struct blk_desc *desc;
 	int part;
 	void *image;
+	size_t image_size;
 	u8 digest[SHA256_SUM_LEN];
 };
+
+static int freebsd_remove_path(struct blk_desc *desc, int part,
+			       const char *path);
 
 static int freebsd_find_image_marker(const void *image, size_t image_size,
 				     const char *prefix, size_t prefix_size,
@@ -88,11 +96,11 @@ static int freebsd_find_image_marker(const void *image, size_t image_size,
 	return 0;
 }
 
-static int freebsd_check_spi_capacity(void)
+static int freebsd_check_spi_capacity(u32 layout_mib)
 {
 	struct udevice *dev;
 	struct spi_flash *flash;
-	u32 expected = CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB * SZ_1M;
+	u32 expected = layout_mib * SZ_1M;
 	int ret;
 
 	ret = spi_flash_probe_bus_cs(CONFIG_SF_DEFAULT_BUS,
@@ -103,8 +111,99 @@ static int freebsd_check_spi_capacity(void)
 	if (!flash)
 		return -ENODEV;
 	printf("SPI flash capacity: %u MiB; firmware layout: %u MiB\n",
-	       flash->size / SZ_1M, CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB);
+	       flash->size / SZ_1M, layout_mib);
 	return flash->size >= expected ? 0 : -EINVAL;
+}
+
+static bool freebsd_spi_16m_to_32m(const char *candidate, size_t image_size)
+{
+	static const char old_suffix[] = ":SPI:16M";
+	static const char new_suffix[] = ":SPI:32M";
+	size_t current_len = strlen(freebsd_spi_compat_marker);
+	size_t suffix_len = sizeof(old_suffix) - 1;
+
+	if (CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB != 16 ||
+	    image_size != FREEBSD_SPI_32M_UPDATE_SIZE ||
+	    current_len < suffix_len ||
+	    strcmp(freebsd_spi_compat_marker + current_len - suffix_len,
+		   old_suffix) ||
+	    strncmp(candidate, freebsd_spi_compat_marker,
+		    current_len - suffix_len))
+		return false;
+	return !strcmp(candidate + current_len - suffix_len, new_suffix);
+}
+
+static const char *freebsd_firmware_storage(void)
+{
+	ulong storage = env_get_ulong("rk_boot_storage", 10, 0);
+
+	if (storage == 1 || storage == 2)
+		return "MMC";
+	if (storage == 9)
+		return "SPI";
+	return NULL;
+}
+
+static int freebsd_check_firmware_target(const void *image, size_t image_size,
+					 const char *storage, bool migrate)
+{
+	const char *compat = CONFIG_RK3588_FREEBSD_SPI_COMPAT;
+	const char *board_end = strstr(compat, ":SPI:");
+	const char *marker;
+	char expected[96];
+	size_t available;
+	size_t board_len;
+
+	if (!storage || !board_end || image_size < FREEBSD_FW_TARGET_SECTOR_SIZE)
+		return -EINVAL;
+	marker = image + image_size - FREEBSD_FW_TARGET_SECTOR_SIZE;
+	available = FREEBSD_FW_TARGET_SECTOR_SIZE;
+	if (memcmp(marker, FREEBSD_FW_TARGET_PREFIX,
+		   sizeof(FREEBSD_FW_TARGET_PREFIX) - 1) ||
+	    !memchr(marker, '\0', available))
+		return -EINVAL;
+	board_len = board_end - compat;
+	if (snprintf(expected, sizeof(expected), "%s%.*s:%s:%uM",
+		     FREEBSD_FW_TARGET_PREFIX, (int)board_len, compat, storage,
+		     migrate ? 32 : CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB) >=
+	    sizeof(expected))
+		return -E2BIG;
+	return strcmp(marker, expected) ? -EINVAL : 0;
+}
+
+static int freebsd_update_mmc(struct freebsd_spi_update *update, void *verify)
+{
+	struct disk_partition info;
+	struct blk_desc *target;
+	lbaint_t first = 64;
+	lbaint_t blocks = update->image_size / 512 - first;
+	int devnum = mmc_get_env_dev();
+
+	target = blk_get_devnum_by_uclass_id(UCLASS_MMC, devnum);
+	if (!target || target->blksz != 512 || part_get_info(target, 1, &info) ||
+	    strcmp(info.name, "rk3588_firmware") || info.start > first ||
+	    info.start + info.size <
+		CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB * SZ_1M / 512) {
+		printf("MMC update rejected: invalid rk3588_firmware partition\n");
+		return -EINVAL;
+	}
+	if (freebsd_remove_path(update->desc, update->part,
+				 FREEBSD_SPI_REQUEST_PATH)) {
+		printf("MMC update cancelled: request is not one-shot\n");
+		return -ECANCELED;
+	}
+	printf("Updating MMC firmware on mmc%d; do not remove power\n", devnum);
+	if (blk_dwrite(target, first, blocks,
+		       (u8 *)update->image + first * 512) != blocks ||
+	    blk_dread(target, first, blocks,
+		      (u8 *)verify + first * 512) != blocks ||
+	    memcmp((u8 *)update->image + first * 512,
+		   (u8 *)verify + first * 512, blocks * 512)) {
+		printf("MMC UPDATE FAILED: do not reset; use Maskrom recovery\n");
+		return -EIO;
+	}
+	memcpy(verify, update->image, first * 512);
+	return 0;
 }
 #endif
 
@@ -453,8 +552,12 @@ static int freebsd_read_spi_request(struct blk_desc *desc, int part,
 			if (have_size)
 				return -EINVAL;
 			value = simple_strtoul(equal, &end, 10);
-			if (!*equal || *end || value != CONFIG_ENV_OFFSET)
+			if (!*equal || *end ||
+			    (value != CONFIG_ENV_OFFSET &&
+			     (CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB != 16 ||
+			      value != FREEBSD_SPI_32M_UPDATE_SIZE)))
 				return -EINVAL;
+			update->image_size = value;
 			have_size = true;
 		} else if (!strcmp(line, "sha256")) {
 			if (have_digest || strlen(equal) != SHA256_SUM_LEN * 2 ||
@@ -469,7 +572,7 @@ static int freebsd_read_spi_request(struct blk_desc *desc, int part,
 		return -EINVAL;
 	if (fs_set_blk_dev_with_part(desc, part) ||
 	    fs_size(FREEBSD_SPI_IMAGE_PATH, &image_size) ||
-	    image_size != CONFIG_ENV_OFFSET)
+	    image_size != update->image_size)
 		return -EINVAL;
 
 	update->image = memalign(ARCH_DMA_MINALIGN, image_size);
@@ -535,17 +638,78 @@ static bool freebsd_find_spi_update_uclass(enum uclass_id id,
 	return false;
 }
 
+static int freebsd_migrate_spi_16m_to_32m(struct freebsd_spi_update *update,
+					  void *verify, ulong verify_addr)
+{
+	const ulong old_end = 16 * SZ_1M;
+	const ulong extension_size = update->image_size - old_end;
+	const ulong new_env_offset = FREEBSD_SPI_32M_UPDATE_SIZE;
+	const ulong env_bytes = 2 * CONFIG_ENV_SIZE;
+	void *env_copy;
+	ulong env_addr;
+	ulong image_addr = map_to_sysmem(update->image);
+
+	env_copy = memalign(ARCH_DMA_MINALIGN, env_bytes);
+	if (!env_copy)
+		return -ENOMEM;
+	env_addr = map_to_sysmem(env_copy);
+
+	printf("Migrating SPI firmware layout from 16 MiB to 32 MiB\n");
+	if (run_commandf("sf update %lx %lx %lx", image_addr + old_end,
+			 old_end, extension_size) ||
+	    run_commandf("sf read %lx %lx %lx", verify_addr + old_end,
+			 old_end, extension_size) ||
+	    memcmp((u8 *)update->image + old_end, (u8 *)verify + old_end,
+		   extension_size))
+		goto fail;
+
+	if (run_commandf("sf read %lx %x %lx", env_addr, CONFIG_ENV_OFFSET,
+			 env_bytes) ||
+	    run_commandf("sf update %lx %lx %lx", env_addr, new_env_offset,
+			 env_bytes) ||
+	    run_commandf("sf read %lx %lx %lx", verify_addr, new_env_offset,
+			 env_bytes) ||
+	    memcmp(env_copy, verify, env_bytes))
+		goto fail;
+
+	if (freebsd_remove_path(update->desc, update->part,
+				 FREEBSD_SPI_REQUEST_PATH)) {
+		printf("SPI migration cancelled: request is not one-shot\n");
+		free(env_copy);
+		return -ECANCELED;
+	}
+
+	if (run_commandf("sf update %lx 0 %lx", image_addr, old_end) ||
+	    run_commandf("sf read %lx 0 %zx", verify_addr,
+			 update->image_size))
+		goto fail_after_request;
+	free(env_copy);
+	return 0;
+
+fail:
+	printf("SPI migration stopped before replacing the 16 MiB firmware\n");
+	free(env_copy);
+	return -EAGAIN;
+fail_after_request:
+	printf("SPI MIGRATION FAILED: do not reset; use Maskrom recovery\n");
+	free(env_copy);
+	return -EIO;
+}
+
 static int freebsd_apply_spi_update(bool usb_ready, bool nvme_ready,
 				    bool scsi_ready)
 {
 	struct freebsd_spi_update update = {};
 	const char *candidate_compat;
 	const char *candidate_version;
+	const char *storage;
 	void *verify = NULL;
 	u8 digest[SHA256_SUM_LEN];
 	ulong image_addr;
 	ulong verify_addr;
 	bool found;
+	bool migrate;
+	u32 candidate_layout_mib;
 	int ret = 0;
 
 	found = freebsd_find_spi_update_uclass(UCLASS_MMC, &update) ||
@@ -557,13 +721,19 @@ static int freebsd_apply_spi_update(bool usb_ready, bool nvme_ready,
 							       &update));
 	if (!found)
 		return 0;
+	storage = freebsd_firmware_storage();
 
-	ret = freebsd_find_image_marker(update.image, CONFIG_ENV_OFFSET,
+	ret = freebsd_find_image_marker(update.image, update.image_size,
 					freebsd_spi_compat_marker,
 					sizeof(FREEBSD_SPI_COMPAT_PREFIX) - 1,
 					sizeof(freebsd_spi_compat_marker),
 					&candidate_compat);
-	if (ret || strcmp(candidate_compat, freebsd_spi_compat_marker)) {
+	migrate = !ret && freebsd_spi_16m_to_32m(candidate_compat,
+						 update.image_size);
+	if (ret || (strcmp(candidate_compat, freebsd_spi_compat_marker) &&
+		    !migrate) ||
+	    (!strcmp(candidate_compat, freebsd_spi_compat_marker) &&
+	     update.image_size != CONFIG_ENV_OFFSET)) {
 		if (ret)
 			printf("SPI update rejected: invalid compatibility marker (%d)\n",
 			       ret);
@@ -572,7 +742,12 @@ static int freebsd_apply_spi_update(bool usb_ready, bool nvme_ready,
 		ret = 0;
 		goto out;
 	}
-	ret = freebsd_find_image_marker(update.image, CONFIG_ENV_OFFSET,
+	if (freebsd_check_firmware_target(update.image, update.image_size,
+					 storage, migrate)) {
+		printf("Firmware update rejected: image target does not match boot storage\n");
+		goto out;
+	}
+	ret = freebsd_find_image_marker(update.image, update.image_size,
 					freebsd_spi_version_marker,
 					sizeof(FREEBSD_SPI_VERSION_PREFIX) - 1,
 					160,
@@ -583,7 +758,7 @@ static int freebsd_apply_spi_update(bool usb_ready, bool nvme_ready,
 		ret = 0;
 		goto out;
 	}
-	printf("SPI compatibility: %s\n", candidate_compat +
+	printf("Firmware compatibility: %s\n", candidate_compat +
 	       sizeof(FREEBSD_SPI_COMPAT_PREFIX) - 1);
 	printf("Current U-Boot: %s\n", freebsd_spi_version_marker +
 	       sizeof(FREEBSD_SPI_VERSION_PREFIX) - 1);
@@ -598,16 +773,37 @@ static int freebsd_apply_spi_update(bool usb_ready, bool nvme_ready,
 		ret = -ENOMEM;
 		goto out;
 	}
-	verify = map_sysmem(verify_addr, CONFIG_ENV_OFFSET);
+	verify = map_sysmem(verify_addr, update.image_size);
+	if (!strcmp(storage, "MMC")) {
+		ret = freebsd_update_mmc(&update, verify);
+		if (ret) {
+			if (ret == -EINVAL || ret == -ECANCELED)
+				ret = 0;
+			goto out_verify;
+		}
+		goto verify_update;
+	}
 	if (run_command("sf probe", 0)) {
 		ret = -EIO;
 		goto out_verify;
 	}
-	ret = freebsd_check_spi_capacity();
+	candidate_layout_mib = migrate ? 32 :
+		CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB;
+	ret = freebsd_check_spi_capacity(candidate_layout_mib);
 	if (ret) {
 		printf("SPI update rejected: flash capacity mismatch (%d)\n", ret);
 		ret = 0;
 		goto out_verify;
+	}
+	if (migrate) {
+		ret = freebsd_migrate_spi_16m_to_32m(&update, verify,
+						     verify_addr);
+		if (ret) {
+			if (ret == -EAGAIN || ret == -ECANCELED)
+				ret = 0;
+			goto out_verify;
+		}
+		goto verify_update;
 	}
 	if (freebsd_remove_path(update.desc, update.part,
 				 FREEBSD_SPI_REQUEST_PATH)) {
@@ -617,14 +813,15 @@ static int freebsd_apply_spi_update(bool usb_ready, bool nvme_ready,
 
 	image_addr = map_to_sysmem(update.image);
 	printf("Updating SPI firmware; do not remove power\n");
-	if (run_commandf("sf update %lx 0 %x", image_addr,
-			 CONFIG_ENV_OFFSET) ||
-	    run_commandf("sf read %lx 0 %x", verify_addr,
-			 CONFIG_ENV_OFFSET)) {
+	if (run_commandf("sf update %lx 0 %zx", image_addr,
+			 update.image_size) ||
+	    run_commandf("sf read %lx 0 %zx", verify_addr,
+			 update.image_size)) {
 		ret = -EIO;
 		goto update_failed;
 	}
-	sha256_csum_wd(verify, CONFIG_ENV_OFFSET, digest, CHUNKSZ_SHA256);
+verify_update:
+	sha256_csum_wd(verify, update.image_size, digest, CHUNKSZ_SHA256);
 	if (memcmp(update.digest, digest, sizeof(digest))) {
 		ret = -EIO;
 		goto update_failed;
@@ -872,9 +1069,11 @@ static int freebsd_build_menu(void)
 		CONFIG_RK3588_FREEBSD_SPI_COMPAT);
 	snprintf(firmware_size, sizeof(firmware_size), "%u", CONFIG_ENV_OFFSET);
 	env_set("freebsd_firmware_size", firmware_size);
+	env_set("freebsd_firmware_storage", freebsd_firmware_storage());
 #else
 	env_set("freebsd_firmware_compat", NULL);
 	env_set("freebsd_firmware_size", NULL);
+	env_set("freebsd_firmware_storage", NULL);
 #endif
 	freebsd_configure_watchdog();
 	freebsd_clear_menu();
