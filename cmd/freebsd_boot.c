@@ -854,6 +854,9 @@ static int freebsd_build_menu(void)
 	const char *wanted;
 	char targets[FREEBSD_TARGETS_SIZE] = {};
 	char value[16];
+#if IS_ENABLED(CONFIG_RK3588_FREEBSD_SPI_UPDATE)
+	char firmware_size[24];
+#endif
 	int default_index = -1;
 	int index = 0;
 	bool usb_ready;
@@ -864,6 +867,15 @@ static int freebsd_build_menu(void)
 	/* Do not let a saved environment pin an old firmware implementation. */
 	env_set_default_vars(ARRAY_SIZE(runtime_defaults),
 			     (char * const *)runtime_defaults, 0);
+#if IS_ENABLED(CONFIG_RK3588_FREEBSD_SPI_UPDATE)
+	env_set("freebsd_firmware_compat",
+		CONFIG_RK3588_FREEBSD_SPI_COMPAT);
+	snprintf(firmware_size, sizeof(firmware_size), "%u", CONFIG_ENV_OFFSET);
+	env_set("freebsd_firmware_size", firmware_size);
+#else
+	env_set("freebsd_firmware_compat", NULL);
+	env_set("freebsd_firmware_size", NULL);
+#endif
 	freebsd_configure_watchdog();
 	freebsd_clear_menu();
 	mmc_initialize(NULL);

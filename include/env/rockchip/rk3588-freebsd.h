@@ -62,6 +62,12 @@
 				"\"${freebsd_watchdog_active}\"; " \
 			"fdt set /chosen freebsd,uboot-watchdog-timeout " \
 				"\"${freebsd_watchdog_timeout}\"; " \
+			"if test -n \"${freebsd_firmware_compat}\"; then " \
+				"fdt set /chosen freebsd,uboot-firmware-compat " \
+					"\"${freebsd_firmware_compat}\"; " \
+				"fdt set /chosen freebsd,uboot-firmware-size " \
+					"\"${freebsd_firmware_size}\"; " \
+			"fi; " \
 			"if load ${freebsd_iface} ${freebsd_devpart} " \
 					"${kernel_addr_r} ${freebsd_loader}; then " \
 				"bootefi ${kernel_addr_r} ${fdt_addr_r}; " \
