@@ -25,6 +25,8 @@
 #endif
 
 #define FREEBSD_LOADER_PATH	"/EFI/FreeBSD/loader.efi"
+#define FREEBSD_MENU_NAME_PATH	"/uboot-menu-name"
+#define FREEBSD_MENU_NAME_SIZE	32
 #define FREEBSD_REQUEST_PATH	"/uboot-env.request"
 #define FREEBSD_REQUEST_SIZE	512
 #define FREEBSD_MAX_ENTRIES	96
@@ -904,7 +906,8 @@ static void freebsd_configure_watchdog(void)
 }
 
 static int freebsd_add_entry(const char *label, const char *ifname,
-			     int devnum, int part, const char *wanted,
+			     const char *menu_name, int devnum, int part,
+			     const char *wanted,
 			     char *targets, size_t targets_size,
 			     int *index, int *default_index)
 {
@@ -925,8 +928,8 @@ static int freebsd_add_entry(const char *label, const char *ifname,
 		 "echo \"RK3588-BOOT-TARGET "
 		 "${freebsd_iface}${freebsd_devpart}\"; "
 		 "run boot_freebsd_target", ifname, devpart);
-	snprintf(value, sizeof(value), "FreeBSD - %s (%s)=%s",
-		 label, target, command);
+	snprintf(value, sizeof(value), "%-32.32s - %s (%s)=%s",
+		 menu_name, label, target, command);
 	if (strlen(targets) + strlen(target) + (targets[0] ? 1 : 0) >=
 	    targets_size)
 		return -ENOSPC;
@@ -943,6 +946,39 @@ static int freebsd_add_entry(const char *label, const char *ifname,
 	return 0;
 }
 
+static void freebsd_read_menu_name(struct blk_desc *desc, int part,
+				   char *name)
+{
+	loff_t actread;
+	loff_t size;
+	int i;
+
+	strcpy(name, "Unknown");
+	if (fs_set_blk_dev_with_part(desc, part) ||
+	    fs_size(FREEBSD_MENU_NAME_PATH, &size) || size <= 0)
+		return;
+	size = min_t(loff_t, size, FREEBSD_MENU_NAME_SIZE);
+	if (fs_set_blk_dev_with_part(desc, part) ||
+	    fs_read(FREEBSD_MENU_NAME_PATH, map_to_sysmem(name), 0, size,
+		    &actread) || actread != size)
+		goto invalid;
+
+	name[size] = '\0';
+	for (i = 0; i < size && name[i] != '\n' && name[i] != '\r'; i++) {
+		if (!isprint((unsigned char)name[i]) || name[i] == '=')
+			goto invalid;
+	}
+	while (i > 0 && name[i - 1] == ' ')
+		i--;
+	if (!i)
+		goto invalid;
+	name[i] = '\0';
+	return;
+
+invalid:
+	strcpy(name, "Unknown");
+}
+
 static void freebsd_scan_desc(struct blk_desc *desc, const char *label,
 			      const char *wanted, char *targets,
 			      size_t targets_size, int *index,
@@ -950,6 +986,7 @@ static void freebsd_scan_desc(struct blk_desc *desc, const char *label,
 {
 	struct disk_partition info;
 	const char *ifname = blk_get_uclass_name(desc->uclass_id);
+	char menu_name[FREEBSD_MENU_NAME_SIZE + 1];
 	int part;
 
 	for (part = 1; part <= MAX_SEARCH_PARTITIONS; part++) {
@@ -959,7 +996,8 @@ static void freebsd_scan_desc(struct blk_desc *desc, const char *label,
 			continue;
 		if (!fs_exists(FREEBSD_LOADER_PATH))
 			continue;
-		if (freebsd_add_entry(label, ifname, desc->devnum, part,
+		freebsd_read_menu_name(desc, part, menu_name);
+		if (freebsd_add_entry(label, ifname, menu_name, desc->devnum, part,
 				      wanted, targets, targets_size, index,
 				      default_index))
 			return;
