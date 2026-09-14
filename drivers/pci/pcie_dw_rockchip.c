@@ -483,6 +483,36 @@ rockchip_pcie_probe_err_init_port:
 	return ret;
 }
 
+static int rockchip_pcie_remove(struct udevice *dev)
+{
+	struct rk_pcie *priv = dev_get_priv(dev);
+	int ret;
+
+	/* DM removes children first, while their config space is accessible. */
+	rk_pcie_disable_ltssm(priv);
+	if (dm_gpio_is_valid(&priv->rst_gpio)) {
+		ret = dm_gpio_set_value(&priv->rst_gpio, 0);
+		if (ret)
+			return ret;
+	}
+	ret = reset_assert_bulk(&priv->rsts);
+	if (ret)
+		return ret;
+	/* PHY uclass reference counting protects other users of the same PHY. */
+	ret = generic_shutdown_phy(&priv->phy);
+	if (ret)
+		return ret;
+	ret = clk_disable_bulk(&priv->clks);
+	if (ret)
+		return ret;
+
+	/* Leave the possibly shared slot supply on for the operating system. */
+	dm_gpio_free(dev, &priv->rst_gpio);
+	reset_release_bulk(&priv->rsts);
+	clk_release_bulk(&priv->clks);
+	return 0;
+}
+
 static const struct dm_pci_ops rockchip_pcie_ops = {
 	.read_config	= pcie_dw_read_config,
 	.write_config	= pcie_dw_write_config,
@@ -500,5 +530,7 @@ U_BOOT_DRIVER(rockchip_dw_pcie) = {
 	.of_match		= rockchip_pcie_ids,
 	.ops			= &rockchip_pcie_ops,
 	.probe			= rockchip_pcie_probe,
+	.remove			= rockchip_pcie_remove,
+	.flags			= DM_FLAG_OS_PREPARE,
 	.priv_auto		= sizeof(struct rk_pcie),
 };

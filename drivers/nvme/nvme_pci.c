@@ -37,11 +37,26 @@ static int nvme_probe(struct udevice *udev)
 	return nvme_init(udev);
 }
 
+static int nvme_remove(struct udevice *udev)
+{
+	int ret;
+
+	/* Finish controller shutdown while the parent PCIe link is still up. */
+	ret = nvme_shutdown(udev);
+	if (ret)
+		return ret;
+
+	return dm_pci_clrset_config16(udev, PCI_COMMAND,
+				    PCI_COMMAND_MASTER, 0);
+}
+
 U_BOOT_DRIVER(nvme) = {
 	.name	= "nvme",
 	.id	= UCLASS_NVME,
 	.bind	= nvme_bind,
 	.probe	= nvme_probe,
+	.remove	= nvme_remove,
+	.flags	= DM_FLAG_ACTIVE_DMA,
 	.priv_auto	= sizeof(struct nvme_dev),
 };
 
