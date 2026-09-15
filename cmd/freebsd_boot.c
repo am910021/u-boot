@@ -27,6 +27,9 @@
 #define FREEBSD_LOADER_PATH	"/EFI/FreeBSD/loader.efi"
 #define FREEBSD_MENU_NAME_PATH	"/uboot-menu-name"
 #define FREEBSD_MENU_NAME_SIZE	32
+#define FREEBSD_ENTRY_PATH	"/uboot-boot-entry.conf"
+#define FREEBSD_ENTRY_SIZE	1024
+#define FREEBSD_ENTRY_BOOT_PATH_SIZE	128
 #define FREEBSD_REQUEST_PATH	"/uboot-env.request"
 #define FREEBSD_REQUEST_SIZE	512
 #define FREEBSD_MAX_ENTRIES	96
@@ -905,8 +908,163 @@ static void freebsd_configure_watchdog(void)
 #endif
 }
 
+enum freebsd_entry_type {
+	FREEBSD_ENTRY_EFI,
+	FREEBSD_ENTRY_EXTLINUX,
+};
+
+struct freebsd_entry {
+	char name[FREEBSD_MENU_NAME_SIZE + 1];
+	char path[FREEBSD_ENTRY_BOOT_PATH_SIZE];
+	enum freebsd_entry_type type;
+	int part;
+};
+
+static bool freebsd_valid_entry_name(const char *name)
+{
+	const char *p;
+	size_t len = strlen(name);
+
+	if (!len || len > FREEBSD_MENU_NAME_SIZE)
+		return false;
+	for (p = name; *p; p++) {
+		if (!isprint((unsigned char)*p) || *p == '=')
+			return false;
+	}
+	return true;
+}
+
+static bool freebsd_valid_entry_path(const char *path)
+{
+	const char *p;
+
+	if (*path != '/' || strlen(path) >= FREEBSD_ENTRY_BOOT_PATH_SIZE)
+		return false;
+	for (p = path; *p; p++) {
+		if (!isalnum((unsigned char)*p) && !strchr("_./:+-", *p))
+			return false;
+	}
+	return true;
+}
+
+static int freebsd_parse_entry(char *data, struct freebsd_entry *entry)
+{
+	bool have_format = false, have_name = false, have_type = false;
+	bool have_path = false, have_part = false;
+	char *cursor = data;
+	char *line;
+
+	memset(entry, 0, sizeof(*entry));
+	while ((line = strsep(&cursor, "\n")) != NULL) {
+		const char *end;
+		char *value;
+		size_t len = strlen(line);
+
+		if (len && line[len - 1] == '\r')
+			line[--len] = '\0';
+		if (!len || line[0] == '#')
+			continue;
+		value = strchr(line, '=');
+		if (!value || value == line || !value[1])
+			return -EINVAL;
+		*value++ = '\0';
+		if (!strcmp(line, "format")) {
+			if (have_format || strcmp(value, "1"))
+				return -EINVAL;
+			have_format = true;
+		} else if (!strcmp(line, "name")) {
+			if (have_name || !freebsd_valid_entry_name(value))
+				return -EINVAL;
+			strlcpy(entry->name, value, sizeof(entry->name));
+			have_name = true;
+		} else if (!strcmp(line, "type")) {
+			if (have_type)
+				return -EINVAL;
+			if (!strcmp(value, "efi"))
+				entry->type = FREEBSD_ENTRY_EFI;
+			else if (!strcmp(value, "extlinux"))
+				entry->type = FREEBSD_ENTRY_EXTLINUX;
+			else
+				return -EINVAL;
+			have_type = true;
+		} else if (!strcmp(line, "path")) {
+			if (have_path || !freebsd_valid_entry_path(value))
+				return -EINVAL;
+			strlcpy(entry->path, value, sizeof(entry->path));
+			have_path = true;
+		} else if (!strcmp(line, "partition")) {
+			if (have_part)
+				return -EINVAL;
+			if (!strcmp(value, "self")) {
+				entry->part = 0;
+			} else {
+				end = freebsd_parse_number(value, 128, false);
+				if (!end || *end)
+					return -EINVAL;
+				entry->part = dectoul(value, NULL);
+			}
+			have_part = true;
+		} else {
+			return -EINVAL;
+		}
+	}
+
+	if (!have_format || !have_name || !have_type || !have_path ||
+	    (entry->type == FREEBSD_ENTRY_EFI && entry->part))
+		return -EINVAL;
+	return 0;
+}
+
+static int freebsd_read_entry(struct blk_desc *desc, int part,
+			      struct freebsd_entry *entry)
+{
+	char data[FREEBSD_ENTRY_SIZE + 1];
+	loff_t actread;
+	loff_t size;
+
+	if (fs_set_blk_dev_with_part(desc, part) ||
+	    fs_size(FREEBSD_ENTRY_PATH, &size) || size <= 0 ||
+	    size > FREEBSD_ENTRY_SIZE)
+		return -EINVAL;
+	if (fs_set_blk_dev_with_part(desc, part) ||
+	    fs_read(FREEBSD_ENTRY_PATH, map_to_sysmem(data), 0, size,
+		    &actread) || actread != size)
+		return -EIO;
+	data[size] = '\0';
+	return freebsd_parse_entry(data, entry);
+}
+
+static int freebsd_entry_selftest(void)
+{
+	static const char valid[] =
+		"format=1\nname=Armbian\ntype=extlinux\n"
+		"path=/boot/extlinux/extlinux.conf\npartition=2\n";
+	static const char duplicate[] =
+		"format=1\nname=FreeBSD\nname=Again\ntype=efi\n"
+		"path=/EFI/FreeBSD/loader.efi\n";
+	static const char unsafe[] =
+		"format=1\nname=Bad\ntype=efi\npath=/loader.efi;reset\n";
+	struct freebsd_entry entry;
+	char data[FREEBSD_ENTRY_SIZE + 1];
+
+	strcpy(data, valid);
+	if (freebsd_parse_entry(data, &entry) ||
+	    strcmp(entry.name, "Armbian") ||
+	    entry.type != FREEBSD_ENTRY_EXTLINUX || entry.part != 2)
+		return CMD_RET_FAILURE;
+	strlcpy(data, duplicate, sizeof(data));
+	if (!freebsd_parse_entry(data, &entry))
+		return CMD_RET_FAILURE;
+	strlcpy(data, unsafe, sizeof(data));
+	if (!freebsd_parse_entry(data, &entry))
+		return CMD_RET_FAILURE;
+	puts("RK3588 boot-entry self-test passed\n");
+	return CMD_RET_SUCCESS;
+}
+
 static int freebsd_add_entry(const char *label, const char *ifname,
 			     const char *menu_name, int devnum, int part,
+			     bool config_entry,
 			     const char *wanted,
 			     char *targets, size_t targets_size,
 			     int *index, int *default_index)
@@ -923,11 +1081,17 @@ static int freebsd_add_entry(const char *label, const char *ifname,
 	snprintf(devpart, sizeof(devpart), "%d:%d", devnum, part);
 	snprintf(target, sizeof(target), "%s%s", ifname, devpart);
 	snprintf(name, sizeof(name), "bootmenu_%d", *index);
-	snprintf(command, sizeof(command),
-		 "setenv freebsd_iface %s; setenv freebsd_devpart %s; "
-		 "echo \"RK3588-BOOT-TARGET "
-		 "${freebsd_iface}${freebsd_devpart}\"; "
-		 "run boot_freebsd_target", ifname, devpart);
+	if (config_entry) {
+		snprintf(command, sizeof(command), "freebsdboot boot %s %s",
+			 ifname, devpart);
+	} else {
+		snprintf(command, sizeof(command),
+			 "setenv boot_entry_mode legacy-efi; "
+			 "setenv freebsd_iface %s; setenv freebsd_devpart %s; "
+			 "echo RK3588-BOOT-TARGET %s%s MODE legacy-efi; "
+			 "run boot_freebsd_target",
+			 ifname, devpart, ifname, devpart);
+	}
 	snprintf(value, sizeof(value), "%-32.32s - %s (%s)=%s",
 		 menu_name, label, target, command);
 	if (strlen(targets) + strlen(target) + (targets[0] ? 1 : 0) >=
@@ -987,21 +1151,91 @@ static void freebsd_scan_desc(struct blk_desc *desc, const char *label,
 	struct disk_partition info;
 	const char *ifname = blk_get_uclass_name(desc->uclass_id);
 	char menu_name[FREEBSD_MENU_NAME_SIZE + 1];
+	char legacy_name[FREEBSD_MENU_NAME_SIZE + 1];
+	struct freebsd_entry entry;
 	int part;
 
 	for (part = 1; part <= MAX_SEARCH_PARTITIONS; part++) {
 		if (part_get_info(desc, part, &info))
 			continue;
+		if (!(info.bootable & PART_EFI_SYSTEM_PARTITION))
+			continue;
 		if (fs_set_blk_dev_with_part(desc, part))
 			continue;
-		if (!fs_exists(FREEBSD_LOADER_PATH))
+		if (fs_exists(FREEBSD_ENTRY_PATH)) {
+			int boot_part;
+
+			if (!freebsd_read_entry(desc, part, &entry)) {
+				boot_part = entry.part ? entry.part : part;
+				if (fs_set_blk_dev_with_part(desc, boot_part) ||
+				    !fs_exists(entry.path)) {
+					printf("Unavailable entry path %s on %s%d:%d; "
+					       "checking legacy EFI\n", entry.path,
+					       ifname, desc->devnum, boot_part);
+					goto legacy;
+				}
+				if (freebsd_add_entry(label, ifname, entry.name,
+						      desc->devnum, part, true,
+						      wanted, targets, targets_size,
+						      index, default_index))
+					return;
+				continue;
+			}
+			printf("Invalid %s on %s%d:%d; checking legacy EFI\n",
+			       FREEBSD_ENTRY_PATH, ifname, desc->devnum, part);
+		}
+legacy:
+		if (fs_set_blk_dev_with_part(desc, part) ||
+		    !fs_exists(FREEBSD_LOADER_PATH))
 			continue;
 		freebsd_read_menu_name(desc, part, menu_name);
-		if (freebsd_add_entry(label, ifname, menu_name, desc->devnum, part,
+		snprintf(legacy_name, sizeof(legacy_name), "%.19s [legacy EFI]",
+			 menu_name);
+		if (freebsd_add_entry(label, ifname, legacy_name, desc->devnum,
+				      part,
+				      false,
 				      wanted, targets, targets_size, index,
 				      default_index))
 			return;
 	}
+}
+
+static int freebsd_boot_entry(const char *ifname, const char *devpart)
+{
+	struct disk_partition info;
+	struct freebsd_entry entry;
+	struct blk_desc *desc;
+	char bootpart[24];
+	int part;
+
+	part = blk_get_device_part_str(ifname, devpart, &desc, &info, 0);
+	if (part <= 0 || freebsd_read_entry(desc, part, &entry)) {
+		printf("Boot entry on %s %s is no longer valid\n", ifname,
+		       devpart);
+		return CMD_RET_FAILURE;
+	}
+	if (!entry.part)
+		entry.part = part;
+	snprintf(bootpart, sizeof(bootpart), "%d:%d", desc->devnum,
+		 entry.part);
+	if (fs_set_blk_dev_with_part(desc, entry.part) ||
+	    !fs_exists(entry.path)) {
+		printf("Boot entry path is unavailable: %s %s %s\n", ifname,
+		       bootpart, entry.path);
+		return CMD_RET_FAILURE;
+	}
+
+	if (env_set("boot_entry_iface", ifname) ||
+	    env_set("boot_entry_devpart", bootpart) ||
+	    env_set("boot_entry_path", entry.path) ||
+	    env_set("boot_entry_type",
+		    entry.type == FREEBSD_ENTRY_EFI ? "efi" : "extlinux") ||
+	    env_set("boot_entry_mode", "config"))
+		return CMD_RET_FAILURE;
+	printf("RK3588-BOOT-TARGET %s%s MODE config TYPE %s\n", ifname,
+	       devpart, env_get("boot_entry_type"));
+	return run_command("run boot_entry_target", 0) ?
+		CMD_RET_FAILURE : CMD_RET_SUCCESS;
 }
 
 static void freebsd_scan_uclass(enum uclass_id id, const char *label,
@@ -1085,6 +1319,8 @@ static int freebsd_build_menu(void)
 {
 	static const char *const runtime_defaults[] = {
 		"boot_freebsd_target",
+		"boot_entry_target",
+		"freebsd_loader",
 	};
 	const char *wanted;
 	char targets[FREEBSD_TARGETS_SIZE] = {};
@@ -1179,7 +1415,7 @@ static int freebsd_build_menu(void)
 	if (env_set("bootmenu_default", value))
 		return -ENOMEM;
 
-	printf("Detected %d FreeBSD boot target%s\n",
+	printf("Detected %d RK3588 boot target%s\n",
 	       index, index == 1 ? "" : "s");
 	return 0;
 }
@@ -1187,11 +1423,19 @@ static int freebsd_build_menu(void)
 static int do_freebsdboot(struct cmd_tbl *cmdtp, int flag, int argc,
 			  char *const argv[])
 {
+	if (argc == 4 && !strcmp(argv[1], "boot"))
+		return freebsd_boot_entry(argv[2], argv[3]);
+	if (argc == 2 && !strcmp(argv[1], "selftest"))
+		return freebsd_entry_selftest();
+	if (argc != 1)
+		return CMD_RET_USAGE;
 	return freebsd_build_menu() ? CMD_RET_FAILURE : CMD_RET_SUCCESS;
 }
 
 U_BOOT_CMD(
-	freebsdboot, 1, 0, do_freebsdboot,
-	"build a FreeBSD boot menu from detected EFI loaders",
-	""
+	freebsdboot, 4, 0, do_freebsdboot,
+	"build or execute an RK3588 boot menu entry",
+	"\n"
+	"freebsdboot boot <interface> <dev:partition>\n"
+	"freebsdboot selftest"
 );

@@ -12,7 +12,7 @@
 #ifdef CONFIG_RK3588_FREEBSD_BOOT
 #define RK3588_FREEBSD_ENV_SETTINGS \
 	"bootdelay=0\0" \
-	"bootmenu_title=*** FreeBSD U-Boot Boot Menu ***\0" \
+	"bootmenu_title=*** RK3588 U-Boot Boot Menu ***\0" \
 	"bootmenu_delay=3\0" \
 	"logo_delay=0\0" \
 	"freebsd_default_boot=auto\0" \
@@ -20,6 +20,16 @@
 	"freebsd_watchdog_timeout=60\0" \
 	"freebsd_loader=/EFI/FreeBSD/loader.efi\0" \
 	"freebsd_dtb=/dtb/freebsd.dtb\0" \
+	"boot_entry_target=" \
+		"if test \"${boot_entry_type}\" = \"efi\"; then " \
+			"setenv freebsd_iface ${boot_entry_iface}; " \
+			"setenv freebsd_devpart ${boot_entry_devpart}; " \
+			"setenv freebsd_loader ${boot_entry_path}; " \
+			"run boot_freebsd_target; " \
+		"elif test \"${boot_entry_type}\" = \"extlinux\"; then " \
+			"sysboot ${boot_entry_iface} ${boot_entry_devpart} any " \
+				"${scriptaddr} ${boot_entry_path}; " \
+		"fi; echo \"Boot entry failed\"\0" \
 	RK3588_FREEBSD_LOGO_SETTING \
 	"load_logo_mmc=" \
 		"if mmc dev ${logo_mmcdev}; then " \
@@ -58,6 +68,8 @@
 				"\"${freebsd_boot_targets}\"; " \
 			"fdt set /chosen freebsd,boot-target " \
 				"\"${freebsd_iface}${freebsd_devpart}\"; " \
+			"fdt set /chosen freebsd,boot-entry-mode " \
+				"\"${boot_entry_mode}\"; " \
 			"fdt set /chosen freebsd,uboot-watchdog-enabled " \
 				"\"${freebsd_watchdog_active}\"; " \
 			"fdt set /chosen freebsd,uboot-watchdog-timeout " \
@@ -77,7 +89,7 @@
 		"fi; echo \"FreeBSD boot failed\"\0" \
 	"fallback_menu=" \
 		"freebsdboot; " \
-		"echo \"RK3588 FreeBSD U-Boot 2026.07\"; " \
+		"echo \"RK3588 U-Boot 2026.07\"; " \
 		"echo \"Default target: ${freebsd_default_boot}\"; " \
 		"bootmenu ${bootmenu_delay}\0" \
 	"bootcmd=" \
