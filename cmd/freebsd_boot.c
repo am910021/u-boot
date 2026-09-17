@@ -2,6 +2,7 @@
 
 #include <blk.h>
 #include <command.h>
+#include <cli.h>
 #include <dm.h>
 #include <env.h>
 #include <fs.h>
@@ -45,6 +46,8 @@
 #define FREEBSD_FW_TARGET_SECTOR_SIZE	512
 #define FREEBSD_SPI_16M_UPDATE_SIZE	(16 * SZ_1M - SZ_512K)
 #define FREEBSD_SPI_32M_UPDATE_SIZE	(32 * SZ_1M - SZ_512K)
+#define FREEBSD_BOOT_HEADER_OFFSET	SZ_32K
+#define FREEBSD_MMC_FIT_OFFSET		(8 * SZ_1M)
 
 #if CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB != 16 && \
     CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB != 32
@@ -101,7 +104,7 @@ static int freebsd_find_image_marker(const void *image, size_t image_size,
 	return 0;
 }
 
-static int freebsd_check_spi_capacity(u32 layout_mib)
+static int freebsd_check_spi_capacity(u32 layout_mib, size_t image_size)
 {
 	struct udevice *dev;
 	struct spi_flash *flash;
@@ -117,7 +120,8 @@ static int freebsd_check_spi_capacity(u32 layout_mib)
 		return -ENODEV;
 	printf("SPI flash capacity: %u MiB; firmware layout: %u MiB\n",
 	       flash->size / SZ_1M, layout_mib);
-	return flash->size >= expected ? 0 : -EINVAL;
+	return flash->size >= expected && image_size <= flash->size ? 0 :
+		-EINVAL;
 }
 
 static bool freebsd_spi_16m_to_32m(const char *candidate, size_t image_size)
@@ -174,6 +178,81 @@ static int freebsd_check_firmware_target(const void *image, size_t image_size,
 	    sizeof(expected))
 		return -E2BIG;
 	return strcmp(marker, expected) ? -EINVAL : 0;
+}
+
+static bool freebsd_boot_header_valid(const u8 *header, const u8 *fit)
+{
+	static const u8 fit_magic[] = { 0xd0, 0x0d, 0xfe, 0xed };
+
+	return !memcmp(header, "RKNS", 4) &&
+		!memcmp(fit, fit_magic, sizeof(fit_magic));
+}
+
+static int freebsd_mmc_firmware_target(int devnum, struct blk_desc **desc)
+{
+	struct disk_partition info;
+	struct blk_desc *disk;
+
+	disk = blk_get_devnum_by_uclass_id(UCLASS_MMC, devnum);
+	if (!disk || disk->blksz != 512 || part_get_info(disk, 1, &info) ||
+	    strcmp(info.name, "rk3588_firmware") || info.start > 64 ||
+	    info.start + info.size <
+		CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB * SZ_1M / 512)
+		return -EINVAL;
+	*desc = disk;
+	return 0;
+}
+
+static bool freebsd_target_bootable(bool spi, int devnum, bool disabled)
+{
+	struct udevice *dev;
+	struct spi_flash *flash;
+	struct blk_desc *disk;
+	u8 header[512], fit[512], marker[512];
+	u32 fit_offset = spi ? CONFIG_SYS_SPI_U_BOOT_OFFS :
+		FREEBSD_MMC_FIT_OFFSET;
+	u32 marker_offset = CONFIG_ENV_OFFSET - 512;
+
+	if (spi) {
+		if (spi_flash_probe_bus_cs(CONFIG_SF_DEFAULT_BUS,
+					   CONFIG_SF_DEFAULT_CS, &dev))
+			return false;
+		flash = dev_get_uclass_priv(dev);
+		if (!flash || flash->size <
+		    CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB * SZ_1M ||
+		    spi_flash_read(flash, FREEBSD_BOOT_HEADER_OFFSET, 512,
+				   header) ||
+		    spi_flash_read(flash, fit_offset, 512, fit) ||
+		    spi_flash_read(flash, marker_offset, 512, marker))
+			return false;
+	} else {
+		if (freebsd_mmc_firmware_target(devnum, &disk) ||
+		    blk_dread(disk, FREEBSD_BOOT_HEADER_OFFSET / 512, 1,
+			      header) != 1 ||
+		    blk_dread(disk, fit_offset / 512, 1, fit) != 1 ||
+		    blk_dread(disk, marker_offset / 512, 1, marker) != 1)
+			return false;
+	}
+	return (disabled ? !memcmp(header, "\0\0\0\0", 4) :
+		!memcmp(header, "RKNS", 4)) &&
+		!memcmp(fit, "\xd0\x0d\xfe\xed", 4) &&
+		!freebsd_check_firmware_target(marker, sizeof(marker),
+					       spi ? "SPI" : "MMC", false);
+}
+
+static bool freebsd_other_bootable(bool target_spi, int target_mmc)
+{
+	int devnum;
+
+	if (!target_spi && freebsd_target_bootable(true, 0, false))
+		return true;
+	for (devnum = 0; devnum < 4; devnum++) {
+		if ((!target_spi && devnum == target_mmc) ||
+		    !freebsd_target_bootable(false, devnum, false))
+			continue;
+		return true;
+	}
+	return false;
 }
 
 static int freebsd_update_mmc(struct freebsd_spi_update *update, void *verify)
@@ -794,7 +873,8 @@ static int freebsd_apply_spi_update(bool usb_ready, bool nvme_ready,
 	}
 	candidate_layout_mib = migrate ? 32 :
 		CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB;
-	ret = freebsd_check_spi_capacity(candidate_layout_mib);
+	ret = freebsd_check_spi_capacity(candidate_layout_mib,
+					 update.image_size);
 	if (ret) {
 		printf("SPI update rejected: flash capacity mismatch (%d)\n", ret);
 		ret = 0;
@@ -846,6 +926,312 @@ out:
 	free(update.image);
 	return ret;
 }
+
+static int do_rkspi(struct cmd_tbl *cmdtp, int flag, int argc,
+		    char *const argv[])
+{
+	const char *candidate_compat;
+	const char *candidate_version;
+	char confirmation[CONFIG_SYS_CBSIZE + 1];
+	loff_t size, actread;
+	void *image = NULL, *verify = NULL;
+	ulong verify_addr;
+	ulong image_addr;
+	size_t offset;
+	bool full_image;
+	u8 digest[SHA256_SUM_LEN], readback[SHA256_SUM_LEN];
+	int ret = CMD_RET_FAILURE;
+
+	if (argc != 5 || strcmp(argv[1], "install"))
+		return CMD_RET_USAGE;
+	if (fs_set_blk_dev(argv[2], argv[3], FS_TYPE_ANY) ||
+	    fs_size(argv[4], &size) ||
+	    (size != CONFIG_ENV_OFFSET &&
+	     size != CONFIG_ENV_OFFSET + SZ_512K)) {
+		printf("SPI install rejected: expected a %u-byte preserve-env "
+		       "or %u-byte full SPI image\n", CONFIG_ENV_OFFSET,
+		       CONFIG_ENV_OFFSET + SZ_512K);
+		return CMD_RET_FAILURE;
+	}
+	full_image = size != CONFIG_ENV_OFFSET;
+	if (run_command("sf probe", 0) ||
+	    freebsd_check_spi_capacity(CONFIG_RK3588_FREEBSD_SPI_LAYOUT_MIB,
+					size)) {
+		puts("SPI install rejected: flash capacity/layout mismatch\n");
+		return CMD_RET_FAILURE;
+	}
+	image = memalign(ARCH_DMA_MINALIGN, size);
+	verify_addr = env_get_hex("ramdisk_addr_r", 0);
+	if (!image || !verify_addr) {
+		puts("SPI install rejected: insufficient memory\n");
+		goto out;
+	}
+	verify = map_sysmem(verify_addr, size);
+	if (fs_set_blk_dev(argv[2], argv[3], FS_TYPE_ANY) ||
+	    fs_read(argv[4], map_to_sysmem(image), 0, size, &actread) ||
+	    actread != size) {
+		puts("SPI install rejected: cannot read image\n");
+		goto out;
+	}
+	for (offset = CONFIG_ENV_OFFSET; full_image && offset < size;
+	     offset++) {
+		if (((u8 *)image)[offset] != 0xff) {
+			puts("SPI install rejected: environment reserve is not blank\n");
+			goto out;
+		}
+	}
+	if (freebsd_find_image_marker(image, size, freebsd_spi_compat_marker,
+				       sizeof(FREEBSD_SPI_COMPAT_PREFIX) - 1,
+				       sizeof(freebsd_spi_compat_marker),
+				       &candidate_compat) ||
+	    strcmp(candidate_compat, freebsd_spi_compat_marker) ||
+	    freebsd_check_firmware_target(image, CONFIG_ENV_OFFSET, "SPI",
+					  false) ||
+	    freebsd_find_image_marker(image, size, freebsd_spi_version_marker,
+				       sizeof(FREEBSD_SPI_VERSION_PREFIX) - 1,
+				       160, &candidate_version)) {
+		puts("SPI install rejected: board, layout, or image marker mismatch\n");
+		goto out;
+	}
+	if (!freebsd_boot_header_valid((u8 *)image +
+					FREEBSD_BOOT_HEADER_OFFSET,
+					(u8 *)image +
+					CONFIG_SYS_SPI_U_BOOT_OFFS)) {
+		puts("SPI install rejected: invalid boot header or FIT\n");
+		goto out;
+	}
+	sha256_csum_wd(image, size, digest, CHUNKSZ_SHA256);
+	printf("Candidate: %s\n", candidate_version +
+	       sizeof(FREEBSD_SPI_VERSION_PREFIX) - 1);
+	printf("Install %lld bytes to SPI NOR, %s its environment. "
+	       "Future boots will prefer SPI.\n", (long long)size,
+	       full_image ? "resetting" : "preserving");
+	if (cli_readline_into_buffer("Type INSTALL SPI to continue: ",
+				     confirmation, 0) < 0 ||
+	    strcmp(confirmation, "INSTALL SPI")) {
+		puts("SPI install cancelled\n");
+		goto out;
+	}
+	image_addr = map_to_sysmem(image);
+	puts("Writing SPI firmware; do not remove power\n");
+	if (run_commandf("sf update %lx 0 %zx", image_addr,
+			 (size_t)size) ||
+	    run_commandf("sf read %lx 0 %zx", verify_addr,
+			 (size_t)size)) {
+		puts("SPI install failed: do not reset; use Maskrom recovery\n");
+		goto out;
+	}
+	sha256_csum_wd(verify, size, readback, CHUNKSZ_SHA256);
+	if (memcmp(digest, readback, sizeof(digest))) {
+		puts("SPI read-back mismatch: do not reset; use Maskrom recovery\n");
+		goto out;
+	}
+	puts("SPI install verified; reboot manually when ready\n");
+	ret = CMD_RET_SUCCESS;
+out:
+	if (verify)
+		unmap_sysmem(verify);
+	free(image);
+	return ret;
+}
+
+U_BOOT_CMD(
+	rkspi, 5, 0, do_rkspi,
+	"manually install board-matched SPI firmware",
+	"install <interface> <dev:partition> <SPI image path>"
+);
+
+static int freebsd_disable_boot_target(bool spi, int devnum)
+{
+	struct udevice *dev;
+	struct spi_flash *flash;
+	struct blk_desc *disk;
+	char confirmation[CONFIG_SYS_CBSIZE + 1];
+	u8 *buffer, *readback;
+	size_t length = spi ? SZ_4K : 512;
+	int ret = CMD_RET_FAILURE;
+
+	if (!freebsd_target_bootable(spi, devnum, false)) {
+		puts("Boot disable rejected: target is not a matching bootable image\n");
+		return ret;
+	}
+	if (!freebsd_other_bootable(spi, devnum)) {
+		puts("Boot disable rejected: no matching SPI/eMMC/SD fallback found\n");
+		return ret;
+	}
+	buffer = memalign(ARCH_DMA_MINALIGN, length);
+	readback = memalign(ARCH_DMA_MINALIGN, length);
+	if (!buffer || !readback) {
+		free(readback);
+		free(buffer);
+		return ret;
+	}
+	printf("Disable %s U-Boot at 0x%x by invalidating only RKNS; "
+	       "another matching boot image was found, but fallback is not "
+	       "guaranteed.\n", spi ? "SPI" : "MMC",
+	       FREEBSD_BOOT_HEADER_OFFSET);
+	if (cli_readline_into_buffer("Type DISABLE BOOT to continue: ",
+				     confirmation, 0) < 0 ||
+	    strcmp(confirmation, "DISABLE BOOT")) {
+		puts("Boot disable cancelled\n");
+		goto out;
+	}
+	if (spi) {
+		if (spi_flash_probe_bus_cs(CONFIG_SF_DEFAULT_BUS,
+					   CONFIG_SF_DEFAULT_CS, &dev))
+			goto out;
+		flash = dev_get_uclass_priv(dev);
+		if (!flash || flash->sector_size != SZ_4K ||
+		    spi_flash_read(flash, FREEBSD_BOOT_HEADER_OFFSET, length,
+				   buffer))
+			goto out;
+		memset(buffer, 0, 4);
+		if (spi_flash_write(flash, FREEBSD_BOOT_HEADER_OFFSET, 4,
+				    buffer) ||
+		    spi_flash_read(flash, FREEBSD_BOOT_HEADER_OFFSET, length,
+				   readback))
+			goto out;
+	} else {
+		if (freebsd_mmc_firmware_target(devnum, &disk))
+			goto out;
+		if (blk_dread(disk, FREEBSD_BOOT_HEADER_OFFSET / 512, 1,
+			      buffer) != 1)
+			goto out;
+		memset(buffer, 0, 4);
+		if (blk_dwrite(disk, FREEBSD_BOOT_HEADER_OFFSET / 512, 1,
+			       buffer) != 1 ||
+		    blk_dread(disk, FREEBSD_BOOT_HEADER_OFFSET / 512, 1,
+			      readback) != 1)
+			goto out;
+	}
+	if (memcmp(buffer, readback, length))
+		goto out;
+	puts("Boot header disabled and read back; reboot manually\n");
+	ret = CMD_RET_SUCCESS;
+out:
+	if (ret)
+		puts("Boot disable failed; do not reset until recovery is ready\n");
+	free(readback);
+	free(buffer);
+	return ret;
+}
+
+static int freebsd_enable_boot_target(bool spi, int devnum)
+{
+	struct udevice *dev;
+	struct spi_flash *flash;
+	struct blk_desc *disk;
+	char confirmation[CONFIG_SYS_CBSIZE + 1];
+	const char *storage = freebsd_firmware_storage();
+	bool source_spi;
+	u8 *buffer = NULL, *readback = NULL;
+	size_t length = spi ? SZ_4K : 512;
+	int ret = CMD_RET_FAILURE;
+
+	if (!storage) {
+		puts("Boot enable rejected: current boot medium is unknown\n");
+		return ret;
+	}
+	source_spi = !strcmp(storage, "SPI");
+	if ((spi == source_spi &&
+	     (spi || devnum == mmc_get_env_dev())) ||
+	    !freebsd_target_bootable(source_spi,
+				      source_spi ? 0 : mmc_get_env_dev(), false) ||
+	    !freebsd_target_bootable(spi, devnum, true)) {
+		puts("Boot enable rejected: source or disabled target is not valid for this board\n");
+		return ret;
+	}
+	buffer = memalign(ARCH_DMA_MINALIGN, length);
+	readback = memalign(ARCH_DMA_MINALIGN, length);
+	if (!buffer || !readback)
+		goto out;
+	if (spi) {
+		if (spi_flash_probe_bus_cs(CONFIG_SF_DEFAULT_BUS,
+					   CONFIG_SF_DEFAULT_CS, &dev))
+			goto out;
+		flash = dev_get_uclass_priv(dev);
+		if (!flash || flash->sector_size != SZ_4K ||
+		    spi_flash_read(flash, FREEBSD_BOOT_HEADER_OFFSET,
+				   length, buffer))
+			goto out;
+	} else {
+		if (freebsd_mmc_firmware_target(devnum, &disk) ||
+		    blk_dread(disk, FREEBSD_BOOT_HEADER_OFFSET / 512, 1,
+			      buffer) != 1)
+			goto out;
+	}
+	memcpy(buffer, "RKNS", 4);
+	printf("Restore only RKNS on %s using U-Boot's built-in signature; "
+	       "remaining target firmware is unchanged.\n",
+	       spi ? "SPI" : "MMC");
+	if (cli_readline_into_buffer("Type ENABLE BOOT to continue: ",
+				     confirmation, 0) < 0 ||
+	    strcmp(confirmation, "ENABLE BOOT")) {
+		puts("Boot enable cancelled\n");
+		goto out;
+	}
+	if (spi) {
+		if (spi_flash_erase(flash, FREEBSD_BOOT_HEADER_OFFSET,
+				    length) ||
+		    spi_flash_write(flash, FREEBSD_BOOT_HEADER_OFFSET,
+				    length, buffer) ||
+		    spi_flash_read(flash, FREEBSD_BOOT_HEADER_OFFSET,
+				   length, readback))
+			goto out;
+	} else if (blk_dwrite(disk, FREEBSD_BOOT_HEADER_OFFSET / 512,
+			      1, buffer) != 1 ||
+		   blk_dread(disk, FREEBSD_BOOT_HEADER_OFFSET / 512,
+			     1, readback) != 1) {
+		goto out;
+	}
+	if (memcmp(buffer, readback, length))
+		goto out;
+	puts("Boot header enabled and read back; reboot manually\n");
+	ret = CMD_RET_SUCCESS;
+out:
+	if (ret)
+		puts("Boot enable failed; do not reset until recovery is ready\n");
+	free(readback);
+	free(buffer);
+	return ret;
+}
+
+static int do_rkboot(struct cmd_tbl *cmdtp, int flag, int argc,
+		     char *const argv[])
+{
+	char *end;
+	int devnum = 0;
+	bool spi;
+
+	if (argc < 3 || (strcmp(argv[1], "disable") &&
+			 strcmp(argv[1], "enable")))
+		return CMD_RET_USAGE;
+	spi = !strcmp(argv[2], "spi");
+	if (!spi) {
+		if (strcmp(argv[2], "mmc") || argc < 4)
+			return CMD_RET_USAGE;
+		devnum = simple_strtoul(argv[3], &end, 10);
+		if (!argv[3][0] || *end || devnum < 0 || devnum > 3)
+			return CMD_RET_USAGE;
+	}
+	if (!strcmp(argv[1], "disable")) {
+		if (argc != (spi ? 3 : 4))
+			return CMD_RET_USAGE;
+		return freebsd_disable_boot_target(spi, devnum);
+	}
+	if (argc != (spi ? 3 : 4))
+		return CMD_RET_USAGE;
+	return freebsd_enable_boot_target(spi, devnum);
+}
+
+U_BOOT_CMD(
+	rkboot, 4, 0, do_rkboot,
+	"enable or disable matching SPI/eMMC/SD U-Boot firmware",
+	"disable spi\n"
+	"rkboot disable mmc <number>\n"
+	"rkboot enable spi\n"
+	"rkboot enable mmc <number>"
+);
 #endif
 
 static void freebsd_clear_menu(void)
