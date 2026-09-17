@@ -1066,10 +1066,13 @@ static int freebsd_disable_boot_target(bool spi, int devnum)
 		free(buffer);
 		return ret;
 	}
-	printf("Disable %s U-Boot at 0x%x by invalidating only RKNS; "
+	if (spi)
+		puts("Target: running SPI U-Boot\n");
+	else
+		printf("Target: running mmc%d U-Boot\n", devnum);
+	printf("Disable U-Boot at 0x%x by invalidating only RKNS; "
 	       "another matching boot image was found, but fallback is not "
-	       "guaranteed.\n", spi ? "SPI" : "MMC",
-	       FREEBSD_BOOT_HEADER_OFFSET);
+	       "guaranteed.\n", FREEBSD_BOOT_HEADER_OFFSET);
 	if (cli_readline_into_buffer("Type DISABLE BOOT to continue: ",
 				     confirmation, 0) < 0 ||
 	    strcmp(confirmation, "DISABLE BOOT")) {
@@ -1199,12 +1202,22 @@ out:
 static int do_rkboot(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
 {
+	const char *storage;
 	char *end;
 	int devnum = 0;
 	bool spi;
 
-	if (argc < 3 || (strcmp(argv[1], "disable") &&
-			 strcmp(argv[1], "enable")))
+	if (argc == 2 && !strcmp(argv[1], "disable")) {
+		storage = freebsd_firmware_storage();
+		if (!storage) {
+			puts("Boot disable rejected: current boot medium is unknown\n");
+			return CMD_RET_FAILURE;
+		}
+		spi = !strcmp(storage, "SPI");
+		return freebsd_disable_boot_target(spi,
+					   spi ? 0 : mmc_get_env_dev());
+	}
+	if (argc < 3 || strcmp(argv[1], "enable"))
 		return CMD_RET_USAGE;
 	spi = !strcmp(argv[2], "spi");
 	if (!spi) {
@@ -1214,11 +1227,6 @@ static int do_rkboot(struct cmd_tbl *cmdtp, int flag, int argc,
 		if (!argv[3][0] || *end || devnum < 0 || devnum > 3)
 			return CMD_RET_USAGE;
 	}
-	if (!strcmp(argv[1], "disable")) {
-		if (argc != (spi ? 3 : 4))
-			return CMD_RET_USAGE;
-		return freebsd_disable_boot_target(spi, devnum);
-	}
 	if (argc != (spi ? 3 : 4))
 		return CMD_RET_USAGE;
 	return freebsd_enable_boot_target(spi, devnum);
@@ -1226,9 +1234,8 @@ static int do_rkboot(struct cmd_tbl *cmdtp, int flag, int argc,
 
 U_BOOT_CMD(
 	rkboot, 4, 0, do_rkboot,
-	"enable or disable matching SPI/eMMC/SD U-Boot firmware",
-	"disable spi\n"
-	"rkboot disable mmc <number>\n"
+	"disable the running U-Boot or enable another matching boot medium",
+	"disable\n"
 	"rkboot enable spi\n"
 	"rkboot enable mmc <number>"
 );
