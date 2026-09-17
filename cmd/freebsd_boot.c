@@ -932,7 +932,7 @@ static int do_rkspi(struct cmd_tbl *cmdtp, int flag, int argc,
 {
 	const char *candidate_compat;
 	const char *candidate_version;
-	char confirmation[CONFIG_SYS_CBSIZE + 1];
+	char confirmation[CONFIG_SYS_CBSIZE + 1] = { 0 };
 	loff_t size, actread;
 	void *image = NULL, *verify = NULL;
 	ulong verify_addr;
@@ -1046,7 +1046,7 @@ static int freebsd_disable_boot_target(bool spi, int devnum)
 	struct udevice *dev;
 	struct spi_flash *flash;
 	struct blk_desc *disk;
-	char confirmation[CONFIG_SYS_CBSIZE + 1];
+	char confirmation[CONFIG_SYS_CBSIZE + 1] = { 0 };
 	u8 *buffer, *readback;
 	size_t length = spi ? SZ_4K : 512;
 	int ret = CMD_RET_FAILURE;
@@ -1121,7 +1121,7 @@ static int freebsd_enable_boot_target(bool spi, int devnum)
 	struct udevice *dev;
 	struct spi_flash *flash;
 	struct blk_desc *disk;
-	char confirmation[CONFIG_SYS_CBSIZE + 1];
+	char confirmation[CONFIG_SYS_CBSIZE + 1] = { 0 };
 	const char *storage = freebsd_firmware_storage();
 	bool source_spi;
 	u8 *buffer = NULL, *readback = NULL;
